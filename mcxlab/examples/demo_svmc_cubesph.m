@@ -8,10 +8,10 @@
 % Carlo algorithm for accurate and efficient photon transport modeling in
 % complex bio-tissues," Biomed. Opt. Express 11, 6262-6270 (2020)
 %
-% This file is part of Monte Carlo eXtreme (MCX) URL:https://mcx.space
+% This file is part of Monte Carlo eXtreme (MCX) URL:http://mcx.sf.net
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-clear cfg cfg_svmc;
+clear cfg cfg_mcx cfg_svmc cfg_sn;
 
 %% common MC setup
 cfg.nphoton = 1e8;
@@ -59,37 +59,40 @@ cfg_mcx.unitinmm = 0.5;
 cfg_mcx.srcpos = cfg_mcx.srcpos / cfg_mcx.unitinmm;
 
 %% prepare svmc input volume
-tic;
 [xi, yi, zi] = ndgrid(1:dim, 1:dim, 1:dim);
 dist = (xi - 30.5).^2 + (yi - 30.5).^2 + (zi - 30.5).^2;
-vol2 = zeros(size(xi));
-vol2(dist < 625) = 1;
-
-addpath('../../utils');
-svmcvol = mcxsvmc(vol2, 'smoothing', 1); % 1: enable gaussian smoothing 0: otherwise
-fprintf('SVMC preprocessing complete, ');
-toc;
+svmcvol = zeros(size(xi));
+svmcvol(dist < 625) = 1;
 
 cfg_svmc = cfg;
 cfg_svmc.vol = uint8(svmcvol);
+cfg_svmc.issvmc = 1;  % SVMC (MC mode)
+
+%% prepare sn input volume (same as svmc)
+cfg_sn = cfg;
+cfg_sn.vol = uint8(svmcvol);
+cfg_sn.issvmc = 2;  % Surface Nets (SN mode)
 
 %% run simulations
 addpath ../;
 output_vmc = mcxlab(cfg_mcx);   % conventional vmc
-output_svmc = mcxlab(cfg_svmc); % svmc
+output_svmc = mcxlab(cfg_svmc); % svmc (MC mode)
+output_sn = mcxlab(cfg_sn);     % surface nets (SN mode)
 
 %% convert time-resolved fluence to CW fluence
 phi_vmc = sum(output_vmc.data, 4);
 phi_svmc = sum(output_svmc.data, 4);
+phi_sn = sum(output_sn.data, 4);
 
 %% compare CW fluence distributions using contour lines
 [yy_svmc, zz_svmc] = ndgrid(0.5:59.5, 0.5:59.5);
 [yy_vmc, zz_vmc] = ndgrid(0.25:0.5:59.75, 0.25:0.5:59.75);
 
+%% Figure 1: SVMC (MC mode) vs VMC comparison
 figure;
 clines = -10:0.5:10;
 contourf(yy_svmc, zz_svmc, log10(abs(squeeze(phi_svmc(31, :, :)))), clines, 'linestyle', '-', ...
-         'linecolor', 'k', 'linewidth', 2, 'DisplayName', 'SVMC');
+         'linecolor', 'k', 'linewidth', 2, 'DisplayName', 'SVMC (MC)');
 hold on;
 contour(yy_vmc, zz_vmc, log10(abs(squeeze(phi_vmc(61, :, :)))), clines, 'linestyle', '--', ...
         'linecolor', 'w', 'linewidth', 2, 'DisplayName', 'VMC');
@@ -105,6 +108,29 @@ plot(xcirc, ycirc, '--', 'linewidth', 1.5, 'color', [.5 .5 .5], 'HandleVisibilit
 axis equal;
 ylabel('z(mm)');
 xlabel('y(mm)');
+title('SVMC (MC mode) vs VMC');
+lg = legend;
+set(lg, 'Color', [0.5 0.5 0.5]);
+set(lg, 'box', 'on');
+set(gca, 'fontsize', 15);
+
+%% Figure 2: Surface Nets (SN mode) vs VMC comparison
+figure;
+contourf(yy_svmc, zz_svmc, log10(abs(squeeze(phi_sn(31, :, :)))), clines, 'linestyle', '-', ...
+         'linecolor', 'k', 'linewidth', 2, 'DisplayName', 'SN');
+hold on;
+contour(yy_vmc, zz_vmc, log10(abs(squeeze(phi_vmc(61, :, :)))), clines, 'linestyle', '--', ...
+        'linecolor', 'w', 'linewidth', 2, 'DisplayName', 'VMC');
+colorbar('EastOutside');
+
+% plot media boundaries
+plot(xcirc, ycirc, '--', 'linewidth', 1.5, 'color', [.5 .5 .5], 'HandleVisibility', 'off');
+
+% other plot settings
+axis equal;
+ylabel('z(mm)');
+xlabel('y(mm)');
+title('Surface Nets (SN) vs VMC');
 lg = legend;
 set(lg, 'Color', [0.5 0.5 0.5]);
 set(lg, 'box', 'on');

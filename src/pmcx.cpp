@@ -40,7 +40,6 @@
 #include "mcx_core.h"
 #include "mcx_const.h"
 #include "mcx_shapes.h"
-#include "mcx_lang.h"
 #include <pybind11/iostream.h>
 
 // Python binding for runtime_error exception in Python.
@@ -106,7 +105,7 @@ void parseVolume(const py::dict& user_cfg, Config& mcx_config) {
         free(mcx_config.vol);
     }
 
-    size_t dim_xyz = 0;
+    unsigned int dim_xyz = 0;
 
     // Data type-specific logic
     if (py::array_t<int8_t>::check_(volume_handle)) {
@@ -400,7 +399,7 @@ void parseVolume(const py::dict& user_cfg, Config& mcx_config) {
 void parse_config(const py::dict& user_cfg, Config& mcx_config) {
     mcx_initcfg(&mcx_config);
 
-    mcx_config.flog = stderr;
+    mcx_config.flog = stdout;
     GET_SCALAR_FIELD(user_cfg, mcx_config, nphoton, py::int_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, nblocksize, py::int_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, nthread, py::int_);
@@ -699,7 +698,7 @@ void parse_config(const py::dict& user_cfg, Config& mcx_config) {
             throw py::value_error("the 'polprop' field must a 2D array");
         }
 
-        if ((buffer_info.shape.size() > 1 && buffer_info.shape.at(0) > 0 && buffer_info.shape.at(1) != 5) || (buffer_info.shape.size() == 1 && buffer_info.shape.at(0) != 5)) {
+        if ((buffer_info.shape.size() > 1 && buffer_info.shape.at(0) > 0 && buffer_info.shape.at(1) != 5) || buffer_info.shape.size() == 1 && buffer_info.shape.at(0) != 5) {
             throw py::value_error("the 'polprop' field must have 5 columns (mua, radius, rho, n_sph,n_bkg)");
         }
 
@@ -758,7 +757,7 @@ void parse_config(const py::dict& user_cfg, Config& mcx_config) {
 
     if (user_cfg.contains("outputtype")) {
         std::string output_type_str = py::str(user_cfg["outputtype"]);
-        const char* outputtype[] = {"flux", "fluence", "energy", "jacobian", "nscat", "wl", "wp", "wm", "rf", "length", "rfmus", "wltof", "wptof"};
+        const char* outputtype[] = {"flux", "fluence", "energy", "jacobian", "nscat", "wl", "wp", "wm", "rf", ""};
         char outputstr[MAX_SESSION_LENGTH] = {'\0'};
 
         if (output_type_str.empty()) {
@@ -848,7 +847,7 @@ void parse_config(const py::dict& user_cfg, Config& mcx_config) {
         }
 
         auto buffer_info = f_style_volume.request();
-        unsigned int nphase = buffer_info.size;
+        unsigned int nphase = buffer_info.shape.size();
         float* val = static_cast<float*>(buffer_info.ptr);
         mcx_config.nphase = nphase + 2;
         mcx_config.invcdf = (float*) calloc(mcx_config.nphase, sizeof(float));
@@ -873,7 +872,7 @@ void parse_config(const py::dict& user_cfg, Config& mcx_config) {
         }
 
         auto buffer_info = f_style_volume.request();
-        unsigned int nangle = buffer_info.size;
+        unsigned int nangle = buffer_info.shape.size();
         float* val = static_cast<float*>(buffer_info.ptr);
         mcx_config.nangle = nangle;
         mcx_config.angleinvcdf = (float*) calloc(mcx_config.nangle, sizeof(float));
@@ -1004,46 +1003,9 @@ void parse_config(const py::dict& user_cfg, Config& mcx_config) {
         }
     }
 
-    if (user_cfg.contains("flog")) {
-        auto logfile_id_value = user_cfg["flog"];
-
-        if (py::int_::check_(logfile_id_value)) {
-            int logid = py::int_(logfile_id_value);
-            mcx_config.flog = (logid >= 2 ? stderr : (logid == 1 ? stdout : (mcx_config.printnum = -1, stdout)));
-        } else if (py::str::check_(logfile_id_value)) {
-            std::string logfile_id_string_value = py::str(logfile_id_value);
-
-            if (logfile_id_string_value.empty()) {
-                throw py::value_error("the 'flog' field must be an integer or non-empty string");
-            }
-
-            mcx_config.flog = fopen(logfile_id_string_value.c_str(), "a+");
-
-            if (mcx_config.flog == NULL) {
-                throw py::value_error("Log output file can not be written");
-            }
-        }
-    }
-
-    if (user_cfg.contains("lang")) {
-        std::string langid = py::str(user_cfg["lang"]);
-
-        if (langid.empty()) {
-            throw py::value_error("the 'lang' field must be a non-empty string");
-        }
-
-        int idx = mcx_keylookup((char*)langid.c_str(), languagename);
-
-        if (idx == -1) {
-            throw py::value_error("Unsupported language");
-        }
-
-        mcx_lang = cJSON_Parse(translations[idx]);
-    }
-
     // Output arguments parsing
     GET_SCALAR_FIELD(user_cfg, mcx_config, issave2pt, py::bool_);
-    GET_SCALAR_FIELD(user_cfg, mcx_config, issavedet, py::int_);
+    GET_SCALAR_FIELD(user_cfg, mcx_config, issavedet, py::bool_);
     GET_SCALAR_FIELD(user_cfg, mcx_config, issaveseed, py::bool_);
 
     // Flush the std::cout and std::cerr
@@ -1108,15 +1070,15 @@ py::dict pmcx_interface(const py::dict& user_cfg) {
 
         /** Initialize all buffers necessary to store the output variables */
         if (mcx_config.issave2pt == 1) {
-            size_t field_len =
+            int field_len =
                 static_cast<int>(mcx_config.dim.x) * static_cast<int>(mcx_config.dim.y) * static_cast<int>(mcx_config.dim.z) *
-                (size_t) ((mcx_config.tend - mcx_config.tstart) / mcx_config.tstep + 0.5) * mcx_config.srcnum;
+                (int) ((mcx_config.tend - mcx_config.tstart) / mcx_config.tstep + 0.5) * mcx_config.srcnum;
 
             if (mcx_config.replay.seed != nullptr && mcx_config.replaydet == -1) {
                 field_len *= mcx_config.detnum;
             }
 
-            if (mcx_config.replay.seed != nullptr && (mcx_config.outputtype == otRF || mcx_config.outputtype == otRFmus)) {
+            if (mcx_config.replay.seed != nullptr && mcx_config.outputtype == otRF) {
                 field_len *= 2;
             }
 
@@ -1127,7 +1089,7 @@ py::dict pmcx_interface(const py::dict& user_cfg) {
             mcx_config.exportfield = (float*) calloc(field_len, sizeof(float));
         }
 
-        if (mcx_config.issavedet >= 1) {
+        if (mcx_config.issavedet == 1) {
             mcx_config.exportdetected = (float*) malloc(hostdetreclen * mcx_config.maxdetphoton * sizeof(float));
         }
 
@@ -1217,7 +1179,7 @@ py::dict pmcx_interface(const py::dict& user_cfg) {
             }
         }
 
-        if (mcx_config.issavedet >= 1) {
+        if (mcx_config.issavedet == 1) {
             field_dim[0] = hostdetreclen;
             field_dim[1] = mcx_config.detectedcount;
             field_dim[2] = 0;
@@ -1235,7 +1197,7 @@ py::dict pmcx_interface(const py::dict& user_cfg) {
         }
 
         if (mcx_config.issave2pt) {
-            size_t field_len;
+            int field_len;
             field_dim[0] = mcx_config.srcnum * mcx_config.dim.x;
             field_dim[1] = mcx_config.dim.y;
             field_dim[2] = mcx_config.dim.z;
@@ -1245,7 +1207,7 @@ py::dict pmcx_interface(const py::dict& user_cfg) {
                 field_dim[4] = mcx_config.detnum;
             }
 
-            if (mcx_config.replay.seed != nullptr && (mcx_config.outputtype == otRF || mcx_config.outputtype == otRFmus)) {
+            if (mcx_config.replay.seed != nullptr && mcx_config.outputtype == otRF) {
                 field_dim[5] = 2;
             }
 
@@ -1439,7 +1401,7 @@ py::list get_GPU_info() {
 }
 
 PYBIND11_MODULE(_pmcx, m) {
-    m.doc() = "PMCX (" MCX_VERSION "): Python bindings for Monte Carlo eXtreme photon transport simulator, https://mcx.space";
+    m.doc() = "PMCX (" MCX_VERSION "): Python bindings for Monte Carlo eXtreme photon transport simulator, http://mcx.space";
     m.def("run", &pmcx_interface, "Runs MCX with the given config.", py::call_guard<py::scoped_ostream_redirect,
           py::scoped_estream_redirect>());
     m.def("run", &pmcx_interface_wargs, "Runs MCX with the given config.", py::call_guard<py::scoped_ostream_redirect,

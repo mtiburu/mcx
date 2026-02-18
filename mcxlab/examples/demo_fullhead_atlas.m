@@ -7,14 +7,14 @@
 % This demo is identical to the MCX simulation used for Fig.9(a) in
 % TranYan2020.
 %
-% [Sanchez2012] C.E.Sanchez J.E.Richards and C.R.Almli, "Age-Specific MRI Templates
-% for Pediatric Neuroimaging," Developmental Neuropsychology 37, 379–399 (2012).
+% [Sanchez2012] C.E.Sanchez J.E.Richards and C.R.Almli, “Age-Specific MRI Templates
+% for Pediatric Neuroimaging,” Developmental Neuropsychology 37, 379–399 (2012).
 %
-% [TranYan2020] Tran AP+, Yan S+, Fang Q*, (2020) "Improving model-based fNIRS
+% [TranYan2020] Tran AP+, Yan S+, Fang Q*, (2020) “Improving model-based fNIRS
 % analysis using mesh-based anatomical and light-transport models,"
 % Neurophotonics, 7(1), 015008
 %
-% This file is part of Monte Carlo eXtreme (MCX) URL:https://mcx.space
+% This file is part of Monte Carlo eXtreme (MCX) URL:http://mcx.sf.net
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 load('fullhead_atlas.mat');
@@ -25,7 +25,7 @@ cfg.outputtype = 'fluence';
 
 % tissue labels:0-ambient air,1-scalp,2-skull,3-csf,4-gray matter,5-white matter,6-air cavities
 cfg.vol = USC_atlas;
-cfg.prop = [0, 0, 1, 1; 0.019 7.8 0.89 1.37; 0.02 9.0 0.89 1.37; 0.0004 0.009 0.89 1.37; 0.019 7.8 0.89 1.37; 0.08 40.9 0.84 1.37; 0, 0, 1, 1];
+cfg.prop = [0, 0, 1, 1; 0.019 7.8 0.89 1.37; 0.02 9.0 0.89 1.37; 0.004 0.009 0.89 1.37; 0.019 7.8 0.89 1.37; 0.08 40.9 0.84 1.37; 0, 0, 1, 1];
 
 % light source
 cfg.srcnum = 1;

@@ -27,16 +27,43 @@
 *******************************************************************************/
 
 /***************************************************************************//**
-\file    mcx_bench.h
-
-@brief   MCX builtin benchmarks
+\file    mcx_svmc.h
+@brief   SVMC preprocessing GPU kernel header file
 *******************************************************************************/
+#ifndef _MCEXTREME_SVMC_H
+#define _MCEXTREME_SVMC_H
 
-#ifndef _MCEXTREME_BENCHMARK_H
-#define _MCEXTREME_BENCHMARK_H
+#include "mcx_utils.h"
 
-#define MAX_MCX_BENCH  15                           /**< Total number of built-in benchmarks */
-extern const char* benchname[MAX_MCX_BENCH];       /**< String list defining the names of each built-in benchmark */
-extern const char* benchjson[MAX_MCX_BENCH];       /**< JSON-formatted input configuration for each built-in benchmark */
+#include <stdint.h>
+#define MCX_SVMC_GKERNEL_SIZE 3U    // must be an odd positive integer
+#define MCX_SVMC_GKERNEL_STD  1.0f
+#define MCX_SVMC_ISOVALUE     0.5f
 
+#ifdef __cplusplus
+extern "C" {
 #endif
+
+// Host functions (C linkage)
+void mcx_svmc_preprocess(Config* cfg, GPUInfo* gpu);
+void mcx_svmc_preprocess_sn(Config* cfg, GPUInfo* gpu);
+void mcx_svmc_preprocess_surfacenets(Config* cfg, GPUInfo* gpu);
+
+#ifdef __cplusplus
+}
+#endif
+
+// CUDA device code (C++ linkage, outside extern "C")
+#ifdef __CUDACC__
+
+
+// Device helper functions
+__device__ float3 interpolate(float3 a, float3 b, float a_val, float b_val, float isovalue);
+__device__ unsigned int flatten_3d_to_1d(uint3 idx3d, uint3 dim);
+
+// Kernels
+__global__ void split_voxel(float* scalar_field, unsigned char* vol_new, unsigned int label);
+
+#endif // __CUDACC__
+
+#endif // _MCEXTREME_SVMC_H

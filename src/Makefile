@@ -48,6 +48,11 @@ ifneq ($(findstring Darwin,$(PLATFORM)), Darwin)
   CUDART+=-lrt
 endif
 
+# Enable SurfaceNets integration if requested
+ifeq ($(USE_SURFACENETS),1)
+  CUCCOPT+= -DUSE_SURFACENETS
+endif
+
 ifeq ($(BACKEND),ocelot)
   LINKOPT=-L/usr/local/lib `OcelotConfig -l` -ltinfo
   CUCCOPT+=-D__STRICT_ANSI__ -g #--maxrregcount 32
@@ -79,7 +84,7 @@ CPPFLAGS+=-g -Wall #-pedantic #-DNO_LZMA # -DUSE_OS_TIMER
 OBJSUFFIX=.o
 EXESUFFIX=
 
-FILES=mcx_core mcx_utils mcx_shapes mcx_tictoc mcx mcx_bench mcx_neurojson mcx_mie mcx_lang cjson/cJSON ubj/ubjw
+FILES=mcx_core mcx_svmc mcx_svmc_surfacenets MMCellMap MMSurfaceNet MMCellFlag mcx_utils mcx_shapes mcx_tictoc mcx mcx_bench mcx_mie cjson/cJSON ubj/ubjw
 
 ifeq ($(findstring _NT-,$(PLATFORM)), _NT-)
   CC=nvcc
@@ -97,11 +102,7 @@ ifeq ($(findstring _NT-,$(PLATFORM)), _NT-)
   EXESUFFIX=.exe
   DLLFLAG=
   OMP=-openmp
-  ifeq ($(findstring CYGWIN,$(PLATFORM)), CYGWIN)
-      MEX=cmd /c mex COMPFLAGS='-MT'
-  else
-      MEX=cmd //s //c mex -v COMPFLAGS='-MT'
-  endif
+  MEX=cmd //s //c mex COMPFLAGS='-MT'
   NVCCOMP=$(CUOMPLINK) "$(OMP)"
   CUCCOPT+=$(NVCCOMP)
   CFLAGS=
@@ -137,26 +138,21 @@ endif
 
 
 ifneq (,$(filter mex,$(MAKECMDGOALS)))
-  FILES=mcx_core mcx_utils mcx_shapes mcx_tictoc mcx_bench mcx_mie mcx_lang cjson/cJSON
+  FILES=mcx_core mcx_svmc mcx_svmc_surfacenets MMCellMap MMSurfaceNet MMCellFlag mcx_utils mcx_shapes mcx_tictoc mcx_bench mcx_mie cjson/cJSON
   ZMATLIB=
   USERLINKOPT=
   ZLIBFLAG=
 endif
 
 ifneq (,$(filter oct,$(MAKECMDGOALS)))
-  FILES=mcx_core mcx_utils mcx_shapes mcx_tictoc mcx_bench mcx_mie mcx_lang cjson/cJSON
+  FILES=mcx_core mcx_svmc mcx_svmc_surfacenets MMCellMap MMSurfaceNet MMCellFlag mcx_utils mcx_shapes mcx_tictoc mcx_bench mcx_mie cjson/cJSON
   ZMATLIB=
   USERLINKOPT=
   ZLIBFLAG=
 endif
 
-GPUARCH := $(shell $(CUDACC) --list-gpu-code  2> /dev/null | grep '^sm_' | head -1)
-ifeq ($(GPUARCH),)
-    CUGENCODE?=-arch=sm_35
-else
-    CUGENCODE?=-arch=$(GPUARCH)
-endif
-
+GPU_ARCH  := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n1 | sed 's/\.//')
+CUGENCODE?=-arch=sm_$(GPU_ARCH)
 OUTPUTFLAG:=-o
 
 ##  Target section  ##
@@ -207,7 +203,7 @@ log posix xoro fermi:      LINKOPT+=$(CUOMPLINK) "$(OMP)"
 
 debugxor debuglog:	CUCCOPT+=-DMCX_DEBUG
 fermi fermimex fermioct:     CUCCOPT+=-DSAVE_DETECTORS -use_fast_math $(CUGENCODE)
-fermi fermimex fermioct: CUCCOPT+=-DMCX_TARGET_NAME='"Kilo-Kelvin"'
+fermi fermimex fermioct: CUCCOPT+=-DMCX_TARGET_NAME='"Jumbo Jolt"'
 xorfermi:   xor
 xorofermi:  xoro
 posixfermi: posix
@@ -234,7 +230,7 @@ static:     CUOMPLINK=-Xcompiler
 static:     LINKOPT=$(CUDA_STATIC)
 
 fermimex:   AR=$(MEX)
-fermimex:   LINKOPT+= CXXFLAGS='$$CXXFLAGS -g -DSAVE_DETECTORS -DMCX_CONTAINER -DMATLAB_MEX_FILE $(OMP) $(MEXCCOPT) $(USERCCOPT)' LINKLIBS="$(MEXLINKLIBS) $(MEXLINKOPT)" CXXLIBS='$$CXXLIBS $(MEXLINKOPT)' LDFLAGS='-L"$$MATLABROOT/sys/os/$$ARCH" $$LDFLAGS $(OMP) $(USERLINKOPT)'
+fermimex:   LINKOPT+= CXXFLAGS='$$CXXFLAGS -g -DSAVE_DETECTORS -DMCX_CONTAINER -DMATLAB_MEX_FILE $(OMP) $(MEXCCOPT) $(USERCCOPT)' LINKLIBS="$(MEXLINKLIBS) $(MEXLINKOPT)" CXXLIBS='$$CXXLIBS $(MEXLINKOPT)' LDFLAGS='-L$$TMW_ROOT$$MATLABROOT/sys/os/$$ARCH $$LDFLAGS $(OMP) $(USERLINKOPT)'
 oct fermimex fermioct:    OUTPUT_DIR=../mcxlab
 fermimex:   BINARY=mcx
 fermioct:   BINARY=mcx.mex
@@ -339,8 +335,7 @@ pretty:
 	    --formatted \
 	    --break-blocks \
 	    --exclude=mcx_bench.c \
-		--exclude=mcx_lang.c \
-	   "*.c" "*.h" "*.cpp" "*.cu"
+	    "*.c" "*.h" "*.cpp" "*.cu" "*.cuh"
 
 .DEFAULT_GOAL := all
 

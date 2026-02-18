@@ -2,7 +2,7 @@
 **  \mainpage Monte Carlo eXtreme - GPU accelerated Monte Carlo Photon Migration
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2009-2025
+**  \copyright Qianqian Fang, 2009-2024
 **
 **  \section sref Reference
 **  \li \c (\b Fang2009) Qianqian Fang and David A. Boas,
@@ -48,6 +48,8 @@ This unit is written with CUDA-C and shall be compiled using nvcc in cuda-toolki
 #include "mcx_core.h"
 #include "mcx_tictoc.h"
 #include "mcx_const.h"
+#include "mcx_svmc.h"
+#include "mcx_vector_math.cu"
 
 #include <cuda.h>
 #include "cuda_fp16.h"
@@ -61,7 +63,6 @@ This unit is written with CUDA-C and shall be compiled using nvcc in cuda-toolki
     #define SHADOWCOUNT 2
     #define ZERO        0.f
 #endif
-
 
 #if defined(USE_XOROSHIRO128P_RAND)
     #include "mcx_rand_xoroshiro128p.cu" //< Use USE_XOROSHIRO128P_RAND macro to enable xoroshiro128p+ RNG (XORSHIFT128P)
@@ -97,73 +98,6 @@ This unit is written with CUDA-C and shall be compiled using nvcc in cuda-toolki
         #define __CUDA_ARCH_LIST__ 350
     #endif
 #endif
-
-/**
- * @brief Adding two float3 vectors c=a+b
- */
-
-__device__ float3 operator +(const float3& a, const float3& b) {
-    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
-}
-
-/**
- * @brief Increatment a float3 vector by another float3, a+=b
- */
-
-__device__ void operator +=(float3& a, const float3& b) {
-    a.x += b.x;
-    a.y += b.y;
-    a.z += b.z;
-}
-
-/**
- * @brief Subtracting two float3 vectors c=a+b
- */
-
-__device__ float3 operator -(const float3& a, const float3& b) {
-    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-
-/**
- * @brief Negating a float3 vector c=-a
- */
-
-__device__ float3 operator -(const float3& a) {
-    return make_float3(-a.x, -a.y, -a.z);
-}
-
-/**
- * @brief Front-multiplying a float3 with a scalar c=a*b
- */
-
-__device__ float3 operator *(const float& a, const float3& b) {
-    return make_float3(a * b.x, a * b.y, a * b.z);
-}
-
-/**
- * @brief Post-multiplying a float3 with a scalar c=a*b
- */
-
-__device__ float3 operator *(const float3& a, const float& b) {
-    return make_float3(a.x * b, a.y * b, a.z * b);
-}
-
-/**
- * @brief Multiplying two float3 vectors c=a*b
- */
-
-__device__ float3 operator *(const float3& a, const float3& b) {
-    return make_float3(a.x * b.x, a.y * b.y, a.z * b.z);
-}
-
-/**
- * @brief Dot-product of two float3 vectors c=a*b
- */
-
-__device__ float dot(const float3& a, const float3& b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
 
 /**
  * @brief Concatenated optical properties and det positions, stored in constant memory
@@ -262,7 +196,7 @@ __device__ inline uint finddetector(MCXpos* p0) {
         if ((gproperty[i].x - p0->x) * (gproperty[i].x - p0->x) +
                 (gproperty[i].y - p0->y) * (gproperty[i].y - p0->y) +
                 (gproperty[i].z - p0->z) * (gproperty[i].z - p0->z) < gproperty[i].w * gproperty[i].w) {
-            return (gproperty[i].w < 0.f) ? 0 : i - gcfg->maxmedia;
+            return i - gcfg->maxmedia;
         }
     }
 
@@ -685,7 +619,7 @@ __device__ void updateproperty(Medium* prop, unsigned int& mediaid, RandType t[R
         prop->mua = val.h[0] * (1.f / 65535.f) * (gproperty[2].x - gproperty[1].x) + gproperty[1].x;
         prop->mus = val.h[1] * (1.f / 65535.f) * (gproperty[2].y - gproperty[1].y) + gproperty[1].y;
         prop->n = gproperty[!(mediaid & MED_MASK) == 0].w;
-    } else if (issvmc) { //< SVMC mode [c7][c6][c5][c4] and [c3][c2][c1][c0] stored as two 4-byte records;
+    } else if (issvmc) { //< SVMC mode [c4][c5][c6][c7] and [c0][c1][c2][c3] stored as two 4-byte records;
         if (idx1d == OUTSIDE_VOLUME_MIN || idx1d == OUTSIDE_VOLUME_MAX) {
             *((float4*)(prop)) = gproperty[0]; // out-of-bounds
             return;
@@ -1002,10 +936,10 @@ __device__ inline void rotatevector2d(MCXdir* v, float stheta, float ctheta) {
  * This function updates the direction vector after a 3D scattering event
  *
  * @param[in,out] v: the direction vector of the photon
- * @param[in] stheta: the sine of the zenith/pole angle
- * @param[in] ctheta: the cosine of the zenith/pole angle
- * @param[in] sphi: the sine of the azimuthal angle
- * @param[in] cphi: the cosine of the azimuthal angle
+ * @param[in] stheta: the sine of the azimuthal angle
+ * @param[in] ctheta: the cosine of the azimuthal angle
+ * @param[in] sphi: the sine of the zenith angle
+ * @param[in] cphi: the cosine of the zenith angle
  */
 
 __device__ inline void rotatevector(MCXdir* v, float stheta, float ctheta, float sphi, float cphi) {
@@ -1028,30 +962,6 @@ __device__ inline void rotatevector(MCXdir* v, float stheta, float ctheta, float
     v->z *= tmp0;
 
     GPUDEBUG(("new dir: %10.5e %10.5e %10.5e\n", v->x, v->y, v->z));
-}
-
-/**
- * @brief Rotate photon direction around an axis (perpendicular case)
- *
- * Assumes photon_dir is perpendicular to axis (dot product = 0)
- *
- * @param[in,out] photon_dir: the photon direction to rotate (perpendicular to axis)
- * @param[in] axis: normalized rotation axis
- * @param[in] stheta: sine of rotation angle
- * @param[in] ctheta: cosine of rotation angle
- */
-__device__ inline void rotate_perpendicular_vector(MCXdir* photon_dir, const float3* axis, float stheta, float ctheta) {
-    // Compute cross product: axis × photon_dir
-    float3 cross;
-    cross.x = axis->y * photon_dir->z - axis->z * photon_dir->y;
-    cross.y = axis->z * photon_dir->x - axis->x * photon_dir->z;
-    cross.z = axis->x * photon_dir->y - axis->y * photon_dir->x;
-
-    // Apply Rodrigues' formula (simplified for perpendicular case):
-    // v_rot = v * cos(theta) + (axis × v) * sin(theta)
-    photon_dir->x = photon_dir->x * ctheta + cross.x * stheta;
-    photon_dir->y = photon_dir->y * ctheta + cross.y * stheta;
-    photon_dir->z = photon_dir->z * ctheta + cross.z * stheta;
 }
 
 /**
@@ -1138,7 +1048,7 @@ __device__ inline int launchnewphoton(MCXpos* p, MCXdir* v, Stokes* s, MCXtime* 
 
                     if (fabsf(oldval) > MAX_ACCUM) {
                         atomicadd(& field[*idx1d + tshift * gcfg->dimlen.z], ((oldval > 0.f) ? -MAX_ACCUM : MAX_ACCUM));
-                        atomicadd(& field[*idx1d + tshift * gcfg->dimlen.z + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w], ((oldval > 0.f) ? MAX_ACCUM : -MAX_ACCUM));
+                        atomicadd(& field[*idx1d + tshift * gcfg->dimlen.z + gcfg->dimlen.w], ((oldval > 0.f) ? MAX_ACCUM : -MAX_ACCUM));
                     }
 
 #endif
@@ -1156,7 +1066,7 @@ __device__ inline int launchnewphoton(MCXpos* p, MCXdir* v, Stokes* s, MCXtime* 
 
                             if (fabsf(oldval) > MAX_ACCUM) {
                                 atomicadd(& field[(*idx1d + tshift * gcfg->dimlen.z)*gcfg->srcnum + i], ((oldval > 0.f) ? -MAX_ACCUM : MAX_ACCUM));
-                                atomicadd(& field[(*idx1d + tshift * gcfg->dimlen.z)*gcfg->srcnum + i + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w], ((oldval > 0.f) ? MAX_ACCUM : -MAX_ACCUM));
+                                atomicadd(& field[(*idx1d + tshift * gcfg->dimlen.z)*gcfg->srcnum + i + gcfg->dimlen.w], ((oldval > 0.f) ? MAX_ACCUM : -MAX_ACCUM));
                             }
 
 #endif
@@ -1224,10 +1134,6 @@ __device__ inline int launchnewphoton(MCXpos* p, MCXdir* v, Stokes* s, MCXtime* 
                 launchsrc = (MCXSrc*)(gproperty + gcfg->maxmedia + 1 + gcfg->detnum + ((int)(ppath[gcfg->w0offset - 1] - 2) * 4));
             }
         }
-    }
-
-    if (gcfg->seed == SEED_FROM_FILE && gcfg->srcid >= 1) {
-        rand_uniform01(t);
     }
 
     ppath += gcfg->partialdata;
@@ -1310,10 +1216,10 @@ __device__ inline int launchnewphoton(MCXpos* p, MCXdir* v, Stokes* s, MCXtime* 
 
                             p->w = 1.f;
                         }
-                    } else if (gcfg->srctype == MCX_SRC_FOURIER) {
+                    } else if (gcfg->srctype == MCX_SRC_FOURIER)
                         p->w = launchsrc->pos.w * (cosf((floorf(launchsrc->param1.w) * rx + floorf(launchsrc->param2.w) * ry
                                                          + launchsrc->param1.w - floorf(launchsrc->param1.w)) * TWO_PI) * (1.f - launchsrc->param2.w + floorf(launchsrc->param2.w)) + 1.f) * 0.5f; //between 0 and 1
-                    } else if (gcfg->srctype == MCX_SRC_PENCILARRAY) {
+                    else if (gcfg->srctype == MCX_SRC_PENCILARRAY) {
                         p->x = launchsrc->pos.x + floorf(rx * launchsrc->param1.w) * launchsrc->param1.x / (launchsrc->param1.w - 1.f) + floorf(ry * launchsrc->param2.w) * launchsrc->param2.x / (launchsrc->param2.w - 1.f);
                         p->y = launchsrc->pos.y + floorf(rx * launchsrc->param1.w) * launchsrc->param1.y / (launchsrc->param1.w - 1.f) + floorf(ry * launchsrc->param2.w) * launchsrc->param2.y / (launchsrc->param2.w - 1.f);
                         p->z = launchsrc->pos.z + floorf(rx * launchsrc->param1.w) * launchsrc->param1.z / (launchsrc->param1.w - 1.f) + floorf(ry * launchsrc->param2.w) * launchsrc->param2.z / (launchsrc->param2.w - 1.f);
@@ -1518,22 +1424,10 @@ __device__ inline int launchnewphoton(MCXpos* p, MCXdir* v, Stokes* s, MCXtime* 
                     if (gcfg->srctype == MCX_SRC_LINE) {
                         float sphi, cphi;
                         r = rsqrtf(launchsrc->param1.x * launchsrc->param1.x + launchsrc->param1.y * launchsrc->param1.y + launchsrc->param1.z * launchsrc->param1.z);
-
-                        if (launchsrc->param2.x > 0.f) {
-                            *rv = float3(launchsrc->param1.x * r, launchsrc->param1.y * r, launchsrc->param1.z * r);
-                            r = v->x * rv->x + v->y * rv->y + v->z * rv->z;
-                            *((float4*)v) = float4(v->x - r * rv->x, v->y - r * rv->y, v->z - r * rv->z, v->nscat);
-                            r = rsqrtf(v->x * v->x + v->y * v->y + v->z * v->z);
-                            *((float4*)v) = float4(v->x * r, v->y * r, v->z * r, v->nscat);
-                            r = launchsrc->param2.x * (2.f * rand_uniform01(t) - 1.f); // azimuthal angle
-                            sincosf(r, &sphi, &cphi); // y=sin(phi), x=cos(phi)
-                            rotate_perpendicular_vector(v, rv, sphi, cphi);
-                        } else {
-                            *((float4*)v) = float4(launchsrc->param1.x * r, launchsrc->param1.y * r, launchsrc->param1.z * r, v->nscat);
-                            r = TWO_PI * rand_uniform01(t); // azimuthal angle
-                            sincosf(r, &sphi, &cphi); // y=sin(phi), x=cos(phi)
-                            rotatevector(v, 1.f, 0.f, sphi, cphi);
-                        }
+                        *((float4*)v) = float4(launchsrc->param1.x * r, launchsrc->param1.y * r, launchsrc->param1.z * r, v->nscat);
+                        r = TWO_PI * rand_uniform01(t); // phi
+                        sincosf(r, &sphi, &cphi); // y=sin(phi), x=cos(phi)
+                        rotatevector(v, 1.f, 0.f, sphi, cphi);
                     } else if (launchsrc->param2.x > 0.f || launchsrc->param2.y > 0.f) {
                         float sphi, cphi;
                         r = TWO_PI * rand_uniform01(t);
@@ -1555,15 +1449,6 @@ __device__ inline int launchnewphoton(MCXpos* p, MCXdir* v, Stokes* s, MCXtime* 
                         v->x *= r;
                         v->y *= r;
                         v->z *= r;
-                    }
-
-
-                    *idx1d = (int(floorf(p->z)) * gcfg->dimlen.y + int(floorf(p->y)) * gcfg->dimlen.x + int(floorf(p->x)));
-
-                    if (p->x < 0.f || p->y < 0.f || p->z < 0.f || p->x >= gcfg->maxidx.x || p->y >= gcfg->maxidx.y || p->z >= gcfg->maxidx.z) {
-                        *mediaid = 0;
-                    } else {
-                        *mediaid = media[*idx1d];
                     }
 
                     *rv = float3(launchsrc->pos.x + (launchsrc->param1.x) * 0.5f,
@@ -1697,7 +1582,7 @@ __device__ inline int launchnewphoton(MCXpos* p, MCXdir* v, Stokes* s, MCXtime* 
     ppath[2] = ((gcfg->srcnum > 1) ? ppath[2] : p->w); // store initial weight
     v->nscat = EPS;
 
-    if (gcfg->outputtype == otRF || gcfg->outputtype == otRFmus) { // if run RF replay
+    if (gcfg->outputtype == otRF) { // if run RF replay
         f->pathlen = photontof[(threadid * gcfg->threadphoton + min(threadid, gcfg->oddphotons - 1) + (int)f->ndone)];
         sincosf(gcfg->omega * f->pathlen, ppath + 5 + gcfg->srcnum, ppath + 4 + gcfg->srcnum);
     }
@@ -1843,9 +1728,8 @@ __global__ void mcx_main_loop(uint media[], OutputType field[], float genergy[],
     }
 
     ppath = (float*)(sharedmem + sizeof(float) * (gcfg->nphaselen + gcfg->nanglelen) + blockDim.x * (gcfg->issaveseed * RAND_BUF_LEN * sizeof(RandType)));
-    len = gcfg->w0offset + gcfg->srcnum + ((gcfg->outputtype == otRF || gcfg->outputtype == otRFmus) << 1);
-    ppath += threadIdx.x * (int)len; // block#2: maxmedia*thread number to store the partial
-    clearpath(ppath, (int)len);
+    ppath += threadIdx.x * (gcfg->w0offset + gcfg->srcnum + 2 * (gcfg->outputtype == otRF)); // block#2: maxmedia*thread number to store the partial
+    clearpath(ppath, gcfg->w0offset + gcfg->srcnum);
     ppath[gcfg->partialdata]  = genergy[idx << 1];
     ppath[gcfg->partialdata + 1] = genergy[(idx << 1) + 1];
 
@@ -2016,50 +1900,39 @@ __global__ void mcx_main_loop(uint media[], OutputType field[], float genergy[],
                 /** Only compute the reciprocal vector when v is changed, this saves division calculations, which are very expensive on the GPU */
                 rv = float3(__fdividef(1.f, v.x), __fdividef(1.f, v.y), __fdividef(1.f, v.z));
 
-                if (gcfg->outputtype == otWP || gcfg->outputtype == otDCS || gcfg->outputtype == otWPTOF || (gcfg->seed == SEED_FROM_FILE && gcfg->outputtype == otRFmus)) {
+                if (gcfg->outputtype == otWP || gcfg->outputtype == otDCS) {
                     //< photontof[] and replayweight[] should be cached using local mem to avoid global read
                     int tshift = (idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone);
+                    tmp0 = (gcfg->outputtype == otDCS) ? (1.f - ctheta) : 1.f;
                     tshift = (int)(floorf((photontof[tshift] - gcfg->twin0) * gcfg->Rtstep)) +
-                             ( (gcfg->replaydet == -1) ? (((photondetid[tshift] & 0xFFFF) - 1) * gcfg->maxgate) : 0);
+                             ( (gcfg->replaydet == -1) ? ((photondetid[tshift] - 1) * gcfg->maxgate) : 0);
 
                     if (gcfg->extrasrclen && gcfg->srcid < 0) {
-                        tshift += ((int)ppath[gcfg->w0offset - 1] - 1) * ((gcfg->replaydet == -1) ? gcfg->detnum : 1) * gcfg->maxgate;
-                    }
-
-                    tshift = MIN(gcfg->maxgate - 1, tshift);
-
-                    theta = replayweight[(idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone)];
-
-                    if (gcfg->outputtype == otRFmus) {
-                        ctheta = ppath[gcfg->w0offset + gcfg->srcnum];
-                        stheta = ppath[gcfg->w0offset + gcfg->srcnum + 1];
-                        tmp0 = theta * ctheta;
-                        sphi = theta * stheta;
-                    } else {
-                        tmp0 = (gcfg->outputtype == otDCS) ? (1.f - ctheta) : 1.f;
-                        tmp0 = (gcfg->outputtype == otWPTOF) ? photontof[(idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone)] : tmp0;
-                        tmp0 *= theta;
+                        tshift += ((int)ppath[gcfg->w0offset - 1] - 1) * gcfg->maxgate;
                     }
 
 #ifdef USE_ATOMIC
 
                     if (!gcfg->isatomic) {
 #endif
-                        field[idx1d + tshift * gcfg->dimlen.z] += tmp0;
-
-                        if (gcfg->outputtype == otRFmus) {
-                            field[idx1d + tshift * gcfg->dimlen.z + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w] += sphi;
-                        }
-
+                        field[idx1d + tshift * gcfg->dimlen.z] += tmp0 * replayweight[(idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone)];
 #ifdef USE_ATOMIC
                     } else {
-                        atomicAdd(& field[idx1d + tshift * gcfg->dimlen.z], tmp0);
+#ifdef USE_DOUBLE
+                        atomicAdd(& field[idx1d + tshift * gcfg->dimlen.z], tmp0 * replayweight[(idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone)]);
+#else
+                        float oldval = atomicadd(& field[idx1d + tshift * gcfg->dimlen.z], tmp0 * replayweight[(idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone)]);
 
-                        if (gcfg->outputtype == otRFmus) {
-                            atomicAdd(& field[idx1d + tshift * gcfg->dimlen.z + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w], sphi);
+                        if (fabsf(oldval) > MAX_ACCUM) {
+                            if (atomicadd(& field[idx1d + tshift * gcfg->dimlen.z], -oldval) < 0.f) {
+                                atomicadd(& field[idx1d + tshift * gcfg->dimlen.z], oldval);
+                            } else {
+                                atomicadd(& field[idx1d + tshift * gcfg->dimlen.z + gcfg->dimlen.w], oldval);
+                            }
                         }
 
-                        GPUDEBUG(("atomic write to [%d] %e, w=%f\n", idx1d, tmp0, p.w));
+#endif
+                        GPUDEBUG(("atomic write to [%d] %e, w=%f\n", idx1d, tmp0 * replayweight[(idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone)], p.w));
                     }
 
 #endif
@@ -2197,33 +2070,31 @@ __global__ void mcx_main_loop(uint media[], OutputType field[], float genergy[],
 #else
                 float weight = 0.f;
 #endif
-                int tshift = MIN(gcfg->maxgate - 1, (int)(floorf((f.t - gcfg->twin0) * gcfg->Rtstep)));
+                int tshift = (int)(floorf((f.t - gcfg->twin0) * gcfg->Rtstep));
 
                 /** calculate the quality to be accummulated */
                 if (gcfg->outputtype == otEnergy) {
                     weight = w0 - p.w;
                 } else if (gcfg->outputtype == otFluence || gcfg->outputtype == otFlux) {
-                    weight = (prop.mua < EPS) ? (w0 * f.pathlen) : __fdividef(w0 - p.w, prop.mua);   /** when mua->0, the first two terms of Taylor expansion of w0*(1-exp(-mua*len))/mua = w0*len - mua*len^2*w0/2 */
+                    weight = (prop.mua < 0.001f) ? (w0 * len) : __fdividef(w0 - p.w, prop.mua);   /** when mua->0, take limit_{mua->0} w0*(1-exp(-mua*len))/mua yields w0*len */
                 } else if (gcfg->seed == SEED_FROM_FILE) {
-                    if (gcfg->outputtype == otJacobian || gcfg->outputtype == otRF || gcfg->outputtype == otWLTOF) {
+                    if (gcfg->outputtype == otJacobian || gcfg->outputtype == otRF) {
                         weight = replayweight[(idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone)] * f.pathlen;
 
                         if (gcfg->outputtype == otRF) {
                             weight = -weight * ppath[gcfg->w0offset + gcfg->srcnum];
-                        } else if (gcfg->outputtype == otWLTOF) {
-                            weight = weight * photontof[idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone];
                         }
 
                         tshift = (idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone);
                         tshift = (int)(floorf((photontof[tshift] - gcfg->twin0) * gcfg->Rtstep)) +
-                                 ( (gcfg->replaydet == -1) ? (((photondetid[tshift] & 0xFFFF) - 1) * gcfg->maxgate) : 0);
+                                 ( (gcfg->replaydet == -1) ? ((photondetid[tshift] - 1) * gcfg->maxgate) : 0);
                     }
                 } else if (gcfg->outputtype == otL) {
                     weight = w0 * f.pathlen;
                 }
 
                 if (gcfg->extrasrclen && gcfg->srcid < 0) {
-                    tshift += ((int)ppath[gcfg->w0offset - 1] - 1) * ((gcfg->replaydet == -1) ? gcfg->detnum : 1) * gcfg->maxgate;
+                    tshift += ((int)ppath[gcfg->w0offset - 1] - 1) * gcfg->maxgate;
                 }
 
                 GPUDEBUG(("deposit to [%d] %e, w=%f\n", idx1dold, weight, p.w));
@@ -2249,11 +2120,11 @@ __global__ void mcx_main_loop(uint media[], OutputType field[], float genergy[],
 
                             if (fabsf(oldval) > MAX_ACCUM && gcfg->outputtype != otRF) {
                                 atomicadd(& field[idx1dold + tshift * gcfg->dimlen.z], ((oldval > 0.f) ? -MAX_ACCUM : MAX_ACCUM));
-                                atomicadd(& field[idx1dold + tshift * gcfg->dimlen.z + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w], ((oldval > 0.f) ? MAX_ACCUM : -MAX_ACCUM));
-                                GPUDEBUG(("reducing float round-off error by moving %e to [%d], oldval=%f\n", MAX_ACCUM, idx1dold + tshift * gcfg->dimlen.z + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w, oldval));
+                                atomicadd(& field[idx1dold + tshift * gcfg->dimlen.z + gcfg->dimlen.w], ((oldval > 0.f) ? MAX_ACCUM : -MAX_ACCUM));
+                                GPUDEBUG(("reducing float round-off error by moving %e to [%d], oldval=%f\n", MAX_ACCUM, idx1dold + tshift * gcfg->dimlen.z + gcfg->dimlen.w, oldval));
                             } else if (gcfg->outputtype == otRF && gcfg->omega > 0.f) {
                                 oldval = -replayweight[(idx * gcfg->threadphoton + min(idx, gcfg->oddphotons - 1) + (int)f.ndone)] * f.pathlen * ppath[gcfg->w0offset + gcfg->srcnum + 1];
-                                atomicadd(& field[idx1dold + tshift * gcfg->dimlen.z + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w], oldval);
+                                atomicadd(& field[idx1dold + tshift * gcfg->dimlen.z + gcfg->dimlen.w], oldval);
                             }
 
 #endif
@@ -2267,10 +2138,10 @@ __global__ void mcx_main_loop(uint media[], OutputType field[], float genergy[],
 
                                     if (fabsf(oldval) > MAX_ACCUM && gcfg->outputtype != otRF) {
                                         atomicadd(& field[(idx1dold + tshift * gcfg->dimlen.z)*gcfg->srcnum + i], ((oldval > 0.f) ? -MAX_ACCUM : MAX_ACCUM));
-                                        atomicadd(& field[(idx1dold + tshift * gcfg->dimlen.z)*gcfg->srcnum + i + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w], ((oldval > 0.f) ? MAX_ACCUM : -MAX_ACCUM));
+                                        atomicadd(& field[(idx1dold + tshift * gcfg->dimlen.z)*gcfg->srcnum + i + gcfg->dimlen.w], ((oldval > 0.f) ? MAX_ACCUM : -MAX_ACCUM));
                                     } else if (gcfg->outputtype == otRF) {
                                         oldval = p.w * f.pathlen * ppath[gcfg->w0offset + gcfg->srcnum + 1];
-                                        atomicadd(& field[(idx1dold + tshift * gcfg->dimlen.z)*gcfg->srcnum + i + (uint64_t)gcfg->dimlen.z * gcfg->dimlen.w], oldval);
+                                        atomicadd(& field[(idx1dold + tshift * gcfg->dimlen.z)*gcfg->srcnum + i + gcfg->dimlen.w], oldval);
                                     }
 
 #endif
@@ -2431,14 +2302,6 @@ __global__ void mcx_main_loop(uint media[], OutputType field[], float genergy[],
                         Rtotal = (Rtotal + (ctheta - stheta) / (ctheta + stheta)) * 0.5f;
                         GPUDEBUG(("Rtotal=%f\n", Rtotal));
                     } //< else, total internal reflection
-
-                    if (gcfg->debuglevel & (MCX_DEBUG_MOVE | MCX_DEBUG_MOVE_ONLY)) {
-                        if (ispolarized && gcfg->istrajstokes) {
-                            savedebugstokes(&p, &s, (uint)f.ndone + idx * gcfg->threadphoton + umin(idx, gcfg->oddphotons), gdebugdata, (int)ppath[gcfg->w0offset - 1]);
-                        } else {
-                            savedebugdata(&p, (uint)f.ndone + idx * gcfg->threadphoton + umin(idx, gcfg->oddphotons), gdebugdata, (int)ppath[gcfg->w0offset - 1]);
-                        }
-                    }
 
                     if (Rtotal < 1.f // if total internal reflection does not happen
                             && (!(mediaid == 0 && ((isdet & 0xF) == bcMirror))) // if out of bbx and cfg.bc is not 'm'
@@ -2630,27 +2493,21 @@ int mcx_list_gpu(Config* cfg, GPUInfo** info) {
 
     if (cuerr != cudaSuccess) {
         if (cuerr == (cudaError_t)30) {
-            mcx_error(-(int)cuerr, T_("A CUDA-capable GPU is not found or configured"), __FILE__, __LINE__);
+            mcx_error(-(int)cuerr, "A CUDA-capable GPU is not found or configured", __FILE__, __LINE__);
         }
 
         CUDA_ASSERT(cuerr);
     }
 
     if (deviceCount == 0) {
-        MCX_FPRINTF(cfg->flog, S_RED "%s\n" S_RESET, T_("ERROR: No CUDA-capable GPU device found"));
+        MCX_FPRINTF(stderr, S_RED "ERROR: No CUDA-capable GPU device found\n" S_RESET);
         return 0;
     }
 
     *info = (GPUInfo*)calloc(deviceCount, sizeof(GPUInfo));
 
     if (cfg->gpuid && cfg->gpuid > deviceCount) {
-        MCX_FPRINTF(cfg->flog, S_RED "%s\n" S_RESET, T_("ERROR: Specified GPU ID is out of range"));
-
-        if (*info) {
-            free(*info);
-            *info = NULL;
-        }
-
+        MCX_FPRINTF(stderr, S_RED "ERROR: Specified GPU ID is out of range\n" S_RESET);
         return 0;
     }
 
@@ -2676,11 +2533,7 @@ int mcx_list_gpu(Config* cfg, GPUInfo** info) {
         (*info)[dev].constmem = dp.totalConstMem;
         (*info)[dev].sharedmem = dp.sharedMemPerBlock;
         (*info)[dev].regcount = dp.regsPerBlock;
-#if CUDA_VERSION >= 13000
-        cudaDeviceGetAttribute(&((*info)[dev].clock), cudaDevAttrClockRate, dev);
-#else
         (*info)[dev].clock = dp.clockRate;
-#endif
         (*info)[dev].sm = dp.multiProcessorCount;
         (*info)[dev].core = dp.multiProcessorCount * mcx_corecount(dp.major, dp.minor);
         (*info)[dev].maxmpthread = dp.maxThreadsPerMultiProcessor;
@@ -2688,7 +2541,7 @@ int mcx_list_gpu(Config* cfg, GPUInfo** info) {
         (*info)[dev].autoblock = MAX((*info)[dev].maxmpthread / mcx_smxblock(dp.major, dp.minor), 64);
 
         if ((*info)[dev].autoblock == 0) {
-            MCX_FPRINTF(cfg->flog, S_RED "%s\n" S_RESET, T_("WARNING: maxThreadsPerMultiProcessor can not be detected"));
+            MCX_FPRINTF(stderr, S_RED "WARNING: maxThreadsPerMultiProcessor can not be detected\n" S_RESET);
             (*info)[dev].autoblock = 64;
         }
 
@@ -2696,7 +2549,7 @@ int mcx_list_gpu(Config* cfg, GPUInfo** info) {
 
         if (strncmp(dp.name, "Device Emulation", 16)) {
             if (cfg->isgpuinfo) {
-                MCX_FPRINTF(stdout, S_BLUE"=============================   %s  ================================\n" S_RESET, T_("GPU Information"));
+                MCX_FPRINTF(stdout, S_BLUE"=============================   GPU Information  ================================\n" S_RESET);
                 MCX_FPRINTF(stdout, "Device %d of %d:\t\t%s\n", (*info)[dev].id, (*info)[dev].devcount, (*info)[dev].name);
                 MCX_FPRINTF(stdout, "Compute Capability:\t%u.%u\n", (*info)[dev].major, (*info)[dev].minor);
                 MCX_FPRINTF(stdout, "Global Memory:\t\t%.0f B\nConstant Memory:\t%.0f B\n"
@@ -2752,8 +2605,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
     float4 s0 = (float4)cfg->srciquv;
 
     float3 maxidx = float3(cfg->dim.x, cfg->dim.y, cfg->dim.z);
-    uint timegate = 0, totalgates, threadid = 0;
-    int gpuid;
+    int timegate = 0, totalgates, gpuid, threadid = 0;
 
     /** \c gpuphoton - number of photons to be simulated per thread, determined by total workload and thread number */
     size_t gpuphoton = 0;
@@ -2779,7 +2631,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
     uint sharedbuf = 0;
 
     /** \c dimxyz - output volume variable \c field voxel count, Nx*Ny*Nz*Ns where Ns=cfg.srcnum is the pattern number for photon sharing */
-    size_t dimxyz = cfg->dim.x * cfg->dim.y * cfg->dim.z * ((cfg->srctype == MCX_SRC_PATTERN || cfg->srctype == MCX_SRC_PATTERN3D) ? cfg->srcnum : (cfg->srcid == -1) ? (cfg->extrasrclen + 1) : 1);
+    int dimxyz = cfg->dim.x * cfg->dim.y * cfg->dim.z * ((cfg->srctype == MCX_SRC_PATTERN || cfg->srctype == MCX_SRC_PATTERN3D) ? cfg->srcnum : (cfg->srcid == -1) ? (cfg->extrasrclen + 1) : 1);
 
     /** \c media - input volume representing the simulation domain, format specified in cfg.mediaformat, read-only */
     uint*  media = (uint*)(cfg->vol);
@@ -2867,14 +2719,6 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
         param.skipradius2 = 0.f;
     }
 
-    if (is2d) {
-        /**
-         *  is2d is only turn 1 if only 1 of the 3 dimension has a length of 1; if 2x or 3x of the dimension have a length of 1, use 3D mode
-         */
-        is2d = is2d * ((cfg->dim.x > 1) + (cfg->dim.y > 1) + (cfg->dim.z > 1) == 2);
-        param.is2d = is2d;
-    }
-
     /** Start multiple CPU threads using OpenMP, one thread for each GPU device to run simultaneously, \c threadid returns the current thread ID */
 #ifdef _OPENMP
     threadid = omp_get_thread_num();
@@ -2888,7 +2732,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
     gpuid = cfg->deviceid[threadid] - 1;
 
     if (gpuid < 0) {
-        mcx_error(-1, T_("GPU ID must be non-zero"), __FILE__, __LINE__);
+        mcx_error(-1, "GPU ID must be non-zero", __FILE__, __LINE__);
     }
 
     /** Activate the corresponding GPU device */
@@ -2896,7 +2740,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
 
     /** Use the specified GPU's parameters, stored in gpu[gpuid] to determine the maximum time gates that it can hold */
     if (gpu[gpuid].maxgate == 0 && dimxyz > 0) {
-        size_t needmem = dimxyz + cfg->nthread * sizeof(float4) * 4 + sizeof(float) * cfg->maxdetphoton * hostdetreclen + 10 * 1024 * 1024; /*keep 10M for other things*/
+        int needmem = dimxyz + cfg->nthread * sizeof(float4) * 4 + sizeof(float) * cfg->maxdetphoton * hostdetreclen + 10 * 1024 * 1024; /*keep 10M for other things*/
         gpu[gpuid].maxgate = (gpu[gpuid].globalmem - needmem) / (cfg->dim.x * cfg->dim.y * cfg->dim.z);
         gpu[gpuid].maxgate = MIN(((cfg->tend - cfg->tstart) / cfg->tstep + 0.5), gpu[gpuid].maxgate);
     }
@@ -2904,11 +2748,11 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
     /** Updating host simulation configuration \c cfg, only allow the master thread to modify cfg, others are read-only */
     #pragma omp master
     {
-        if (cfg->exportfield == NULL && cfg->issave2pt) {
+        if (cfg->exportfield == NULL) {
             if (cfg->seed == SEED_FROM_FILE && cfg->replaydet == -1) {
-                cfg->exportfield = (float*)calloc(sizeof(float) * dimxyz, gpu[gpuid].maxgate * (1 + (cfg->outputtype == otRF || cfg->outputtype == otRFmus)) * cfg->detnum);
+                cfg->exportfield = (float*)calloc(sizeof(float) * dimxyz, gpu[gpuid].maxgate * (1 + (cfg->outputtype == otRF)) * cfg->detnum);
             } else {
-                cfg->exportfield = (float*)calloc(sizeof(float) * dimxyz, gpu[gpuid].maxgate * (1 + (cfg->outputtype == otRF || cfg->outputtype == otRFmus)));
+                cfg->exportfield = (float*)calloc(sizeof(float) * dimxyz, gpu[gpuid].maxgate * (1 + (cfg->outputtype == otRF)));
             }
         }
 
@@ -2936,7 +2780,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
         float* vec = &(param.src.dir.x);
 
         if (ABS(vec[is2d - 1]) > EPS) {
-            mcx_error(-1, T_("input domain is 2D, the initial direction can not have non-zero value in the singular dimension"), __FILE__, __LINE__);
+            mcx_error(-1, "input domain is 2D, the initial direction can not have non-zero value in the singular dimension", __FILE__, __LINE__);
         }
     }
 
@@ -3000,7 +2844,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
         if (cfg->workload[i] > 0.f) {
             fullload += cfg->workload[i];
         } else {
-            mcx_error(-1, T_("workload was unspecified for an active device"), __FILE__, __LINE__);
+            mcx_error(-1, "workload was unspecified for an active device", __FILE__, __LINE__);
         }
 
     /** Now we can determine how many photons to be simualated by multiplying the total photon by the relative ratio of per-device workload divided by the total workload */
@@ -3018,7 +2862,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
         param.threadphoton = gpuphoton / gpu[gpuid].autothread / (-cfg->respin);
         param.oddphotons = gpuphoton / (-cfg->respin) - param.threadphoton * gpu[gpuid].autothread;
     } else {
-        mcx_error(-1, T_("respin number can not be 0, check your -r/--repeat input or cfg.respin value"), __FILE__, __LINE__);
+        mcx_error(-1, "respin number can not be 0, check your -r/--repeat input or cfg.respin value", __FILE__, __LINE__);
     }
 
     /** Total time gate number is computed */
@@ -3027,23 +2871,17 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
 
     /** Here we determine if the GPU memory of the current device can store all time gates, if not, disabling normalization */
     if (totalgates > gpu[gpuid].maxgate && cfg->isnormalized) {
-        MCX_FPRINTF(cfg->flog, S_RED "WARNING: %d %d %d [%d %d %d] %s\n" S_RESET, totalgates, gpu[gpuid].maxgate, cfg->isnormalized, cfg->dim.x, cfg->dim.y, cfg->dim.z, T_("GPU memory can not hold all time gates, disabling normalization to allow multiple runs"));
+        MCX_FPRINTF(stderr, S_RED "WARNING: GPU memory can not hold all time gates, disabling normalization to allow multiple runs\n" S_RESET);
         cfg->isnormalized = 0;
     }
 
     #pragma omp barrier
 
-    dimlen.x = cfg->dim.x;
-    dimlen.y = cfg->dim.y * cfg->dim.x;
-    dimlen.z = cfg->dim.x * cfg->dim.y * cfg->dim.z;
-    dimlen.w = gpu[gpuid].maxgate * ((cfg->srctype == MCX_SRC_PATTERN || cfg->srctype == MCX_SRC_PATTERN3D) ? cfg->srcnum : (cfg->srcid == -1) ? (cfg->extrasrclen + 1) : 1);
-
     /** Here we decide the total output buffer, field's length. it is Nx*Ny*Nz*Nt*Ns */
     if (cfg->seed == SEED_FROM_FILE && cfg->replaydet == -1) {
-        dimlen.w *= cfg->detnum;
-        fieldlen = dimlen.z * dimlen.w;
+        fieldlen = dimxyz * gpu[gpuid].maxgate * cfg->detnum;
     } else {
-        fieldlen = dimlen.z * dimlen.w;
+        fieldlen = dimxyz * gpu[gpuid].maxgate;
     }
 
     /** A 1D grid is determined by the total thread number and block size */
@@ -3072,15 +2910,15 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
             CUDA_ASSERT(cudaMemcpyToSymbol(gcfg,   &param, sizeof(MCXParam), 0, cudaMemcpyHostToDevice));
 
             tic = StartTimer();
-            MCX_FPRINTF(cfg->flog, "%s %lu %s ... \t", T_("generating"), fieldlen, T_("random numbers"));
+            MCX_FPRINTF(cfg->flog, "generating %lu random numbers ... \t", fieldlen);
             fflush(cfg->flog);
             mcx_test_rng <<< 1, 1>>>(rngfield, gPseed);
             tic1 = GetTimeMillis();
-            MCX_FPRINTF(cfg->flog, "%s:  \t%d ms\n%s ... \t", T_("kernel complete"), tic1 - tic, T_("retrieving random numbers"));
+            MCX_FPRINTF(cfg->flog, "kernel complete:  \t%d ms\nretrieving random numbers ... \t", tic1 - tic);
             CUDA_ASSERT(cudaGetLastError());
 
             CUDA_ASSERT(cudaMemcpy(field, rngfield, sizeof(float)*dimxyz* gpu[gpuid].maxgate, cudaMemcpyDeviceToHost));
-            MCX_FPRINTF(cfg->flog, "%s:\t%d ms\n\n", T_("transfer complete"), GetTimeMillis() - tic);
+            MCX_FPRINTF(cfg->flog, "transfer complete:\t%d ms\n\n", GetTimeMillis() - tic);
             fflush(cfg->flog);
 
             if (cfg->exportfield) {
@@ -3090,9 +2928,9 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
 #ifndef MCX_CONTAINER
 
             if (cfg->issave2pt && cfg->parentid == mpStandalone) {
-                MCX_FPRINTF(cfg->flog, "%s ...\t", T_("saving data to file"));
+                MCX_FPRINTF(cfg->flog, "saving data to file ...\t");
                 mcx_savedata(field, fieldlen, cfg);
-                MCX_FPRINTF(cfg->flog, "%s : %d ms\n\n", T_("saving data complete"), GetTimeMillis() - tic);
+                MCX_FPRINTF(cfg->flog, "saving data complete : %d ms\n\n", GetTimeMillis() - tic);
                 fflush(cfg->flog);
             }
 
@@ -3224,7 +3062,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
      * Saving detected photon is enabled by default, but in case if a user disabled this feature, a warning is printed
      */
     if (cfg->issavedet) {
-        MCX_FPRINTF(cfg->flog, S_RED "%s\n" S_RESET, T_("WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc"));
+        MCX_FPRINTF(stderr, S_RED "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc\n" S_RESET);
         cfg->issavedet = 0;
     }
 
@@ -3238,6 +3076,11 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
     cachebox.x = (cp1.x - cp0.x + 1);
     cachebox.y = (cp1.y - cp0.y + 1) * (cp1.x - cp0.x + 1);
 
+    dimlen.x = cfg->dim.x;
+    dimlen.y = cfg->dim.y * cfg->dim.x;
+    dimlen.z = cfg->dim.x * cfg->dim.y * cfg->dim.z;
+    dimlen.w = fieldlen;
+
     param.dimlen = dimlen;
     param.cachebox = cachebox;
 
@@ -3247,7 +3090,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
     if (cfg->seed > 0) {
         srand(cfg->seed + threadid);
     } else {
-        srand(time(0) + threadid);
+        srand(time(0));
     }
 
     for (i = 0; i < gpu[gpuid].autothread; i++) {
@@ -3261,35 +3104,27 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
      */
     tic = StartTimer();
     #pragma omp master
-
-    if (cfg->printnum >= 0) {
+    {
         mcx_printheader(cfg);
 
 #ifdef MCX_TARGET_NAME
-        MCX_FPRINTF(cfg->flog, "- %s: [%s] %s [%d.%d] for CUDA-arch [%d] on [%s]\n",
-                    T_("code name"), MCX_TARGET_NAME, T_("compiled by nvcc"), __CUDACC_VER_MAJOR__, __CUDACC_VER_MINOR__, __CUDA_ARCH_LIST__, __DATE__);
+        MCX_FPRINTF(cfg->flog, "- code name: [%s] compiled by nvcc [%d.%d] for CUDA-arch [%d] on [%s]\n",
+                    MCX_TARGET_NAME, __CUDACC_VER_MAJOR__, __CUDACC_VER_MINOR__, __CUDA_ARCH_LIST__, __DATE__);
 #else
-        MCX_FPRINTF(cfg->flog, "- %s: [Vanilla MCX] %s [%d.%d] for CUDA-arch [%d] on [%s]\n",
-                    T_("code name"), T_("compiled by nvcc"), __CUDACC_VER_MAJOR__, __CUDACC_VER_MINOR__, __CUDA_ARCH_LIST__, __DATE__);
+        MCX_FPRINTF(cfg->flog, "- code name: [Vanilla MCX] compiled by nvcc [%d.%d] for CUDA-arch [%d] on [%s]\n",
+                    __CUDACC_VER_MAJOR__, __CUDACC_VER_MINOR__, __CUDA_ARCH_LIST__, __DATE__);
 #endif
-
-        // Validate source type
-        if (cfg->srctype == -1) {
-            MCX_ERROR(-1, "the specified source type is not supported");
-        }
-
-        MCX_FPRINTF(cfg->flog, "- %s: RNG [%s] %s [%d]\n", T_("compiled with"), MCX_RNG_NAME, T_("seed length"), (int)((sizeof(RandType)*RAND_BUF_LEN) >> 2));
+        MCX_FPRINTF(cfg->flog, "- compiled with: RNG [%s] with Seed Length [%d]\n", MCX_RNG_NAME, (int)((sizeof(RandType)*RAND_BUF_LEN) >> 2));
         fflush(cfg->flog);
     }
-
     #pragma omp barrier
 
     /**
      * Copy all host buffers to the GPU
      */
-    MCX_FPRINTF(cfg->flog, "\nGPU=%d (%s) threadph=%d extra=%d np=%.0f nthread=%d maxgate=%d repetition=%d\n", gpuid + 1, gpu[gpuid].name, param.threadphoton, param.oddphotons,
-                (double)gpuphoton, gpu[gpuid].autothread, gpu[gpuid].maxgate, ABS(cfg->respin));
-    MCX_FPRINTF(cfg->flog, "%s ...\t", T_("initializing streams"));
+    MCX_FPRINTF(cfg->flog, "\nGPU=%d (%s) threadph=%d extra=%d np=%ld nthread=%d maxgate=%d repetition=%d\n", gpuid + 1, gpu[gpuid].name, param.threadphoton, param.oddphotons,
+                gpuphoton, gpu[gpuid].autothread, gpu[gpuid].maxgate, ABS(cfg->respin));
+    MCX_FPRINTF(cfg->flog, "initializing streams ...\t");
     fflush(cfg->flog);
 
     mcx_flush(cfg);
@@ -3302,13 +3137,12 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
 
     CUDA_ASSERT(cudaMemcpy(genergy, energy, sizeof(float) * (gpu[gpuid].autothread << 1), cudaMemcpyHostToDevice));
 
-    if (cfg->srcpattern) {
+    if (cfg->srcpattern)
         if (cfg->srctype == MCX_SRC_PATTERN) {
             CUDA_ASSERT(cudaMemcpy(gsrcpattern, cfg->srcpattern, sizeof(float) * (int)(cfg->srcparam1.w * cfg->srcparam2.w * cfg->srcnum), cudaMemcpyHostToDevice));
         } else if (cfg->srctype == MCX_SRC_PATTERN3D) {
             CUDA_ASSERT(cudaMemcpy(gsrcpattern, cfg->srcpattern, sizeof(float) * (int)(cfg->srcparam1.x * cfg->srcparam1.y * cfg->srcparam1.z * cfg->srcnum), cudaMemcpyHostToDevice));
         }
-    }
 
     /**
      * Copy constants to the constant memory on the GPU
@@ -3320,7 +3154,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
         CUDA_ASSERT(cudaMemcpyToSymbol(gproperty, cfg->srcdata,  cfg->extrasrclen * 4 * sizeof(float4), cfg->medianum * sizeof(Medium) + cfg->detnum * sizeof(float4), cudaMemcpyHostToDevice));
     }
 
-    MCX_FPRINTF(cfg->flog, "%s : %d ms\n", T_("init complete"), GetTimeMillis() - tic);
+    MCX_FPRINTF(cfg->flog, "init complete : %d ms\n", GetTimeMillis() - tic);
 
     /**
      *  If one has to simulate a lot of time gates, using the GPU global memory
@@ -3334,9 +3168,9 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
      *
      *  The calculation of the energy conservation will only reflect the last simulation.
      */
-    sharedbuf = (param.nphaselen + param.nanglelen) * sizeof(float) + gpu[gpuid].autoblock * (cfg->issaveseed * (RAND_BUF_LEN * sizeof(RandType)) + sizeof(float) * (param.w0offset + cfg->srcnum + 2 * (cfg->outputtype == otRF || cfg->outputtype == otRFmus)));
+    sharedbuf = (param.nphaselen + param.nanglelen) * sizeof(float) + gpu[gpuid].autoblock * (cfg->issaveseed * (RAND_BUF_LEN * sizeof(RandType)) + sizeof(float) * (param.w0offset + cfg->srcnum + 2 * (cfg->outputtype == otRF)));
 
-    MCX_FPRINTF(cfg->flog, "%s: %d bytes\n", T_("requesting shared memory"), sharedbuf);
+    MCX_FPRINTF(cfg->flog, "requesting %d bytes of shared memory\n", sharedbuf);
 
     /**
      * Outer loop: loop over each time-gate-group, determined by the capacity of the global memory to hold the output data, in most cases, \c totalgates is 1
@@ -3350,8 +3184,8 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
         /** Copy param to the constant memory variable gcfg */
         CUDA_ASSERT(cudaMemcpyToSymbol(gcfg,   &param,     sizeof(MCXParam), 0, cudaMemcpyHostToDevice));
 
-        MCX_FPRINTF(cfg->flog, S_CYAN"%s [%.2ens %.2ens] ...\n" S_RESET
-                    , T_("launching MCX simulation for time window"), param.twin0 * 1e9, param.twin1 * 1e9);
+        MCX_FPRINTF(cfg->flog, S_CYAN"launching MCX simulation for time window [%.2ens %.2ens] ...\n" S_RESET
+                    , param.twin0 * 1e9, param.twin1 * 1e9);
 
         /**
          * Inner loop: loop over total number of repetitions specified by cfg.respin, results will be accumulated to \c field
@@ -3401,7 +3235,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                 }
             }
 #endif
-            MCX_FPRINTF(cfg->flog, "%s%2d ... \n", T_("simulation run#"), iter + 1);
+            MCX_FPRINTF(cfg->flog, "simulation run#%2d ... \n", iter + 1);
             fflush(cfg->flog);
             mcx_flush(cfg);
 
@@ -3571,7 +3405,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
             /** now we can estimate and print the GPU-kernel-only runtime */
             tic1 = GetTimeMillis();
             toc += tic1 - tic0;
-            MCX_FPRINTF(cfg->flog, "%s:  \t%d ms\n%s ... \t", T_("kernel complete"), tic1 - tic, T_("retrieving fields"));
+            MCX_FPRINTF(cfg->flog, "kernel complete:  \t%d ms\nretrieving fields ... \t", tic1 - tic);
 
             /**
              * If the GPU kernel crashed or terminated by error during execution, we need
@@ -3600,11 +3434,11 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                 {
                     if (debugrec > 0) {
                         if (debugrec > cfg->maxjumpdebug) {
-                            MCX_FPRINTF(cfg->flog, S_RED "%s (%d > %d), %s\n" S_RESET,
-                                        T_("WARNING: the saved trajectory positions are more than what your have specified"), debugrec, cfg->maxjumpdebug,
-                                        T_("please use the --maxjumpdebug option to specify a greater number"));
+                            MCX_FPRINTF(cfg->flog, S_RED "WARNING: the saved trajectory positions (%d) \
+are more than what your have specified (%d), please use the --maxjumpdebug option to specify a greater number\n" S_RESET
+                                        , debugrec, cfg->maxjumpdebug);
                         } else {
-                            MCX_FPRINTF(cfg->flog, "%s: %u, total: %d\t", T_("saved trajectory positions"), debugrec, cfg->debugdatalen + debugrec);
+                            MCX_FPRINTF(cfg->flog, "saved %u trajectory positions, total: %d\t", debugrec, cfg->debugdatalen + debugrec);
                         }
 
                         debugrec = min(debugrec, cfg->maxjumpdebug);
@@ -3632,11 +3466,11 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                 }
 
                 if (detected > cfg->maxdetphoton) {
-                    MCX_FPRINTF(cfg->flog, S_RED "%s (%d > %d), %s\n" S_RESET,
-                                T_("WARNING: the detected photon number is more than what your have specified"), detected, cfg->maxjumpdebug,
-                                T_("please use the -H option to specify a greater number"));
+                    MCX_FPRINTF(cfg->flog, S_RED "WARNING: the detected photon (%d) \
+is more than what your have specified (%d), please use the -H option to specify a greater number\t" S_RESET
+                                , detected, cfg->maxdetphoton);
                 } else {
-                    MCX_FPRINTF(cfg->flog, "%s " S_BOLD "" S_BLUE "%d %s" S_RESET", total: " S_BOLD "" S_BLUE "%.0f" S_RESET"\t", T_("detected"), detected, T_("photons"), (double)cfg->detectedcount + detected);
+                    MCX_FPRINTF(cfg->flog, "detected " S_BOLD "" S_BLUE "%d photons" S_RESET", total: " S_BOLD "" S_BLUE "%ld" S_RESET"\t", detected, cfg->detectedcount + detected);
                 }
 
                 /**
@@ -3673,10 +3507,9 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
              * Accumulate volumetric fluence from all threads/devices
              */
             if (cfg->issave2pt) {
-                size_t i;
                 OutputType* rawfield = (OutputType*)malloc(sizeof(OutputType) * fieldlen * SHADOWCOUNT);
                 CUDA_ASSERT(cudaMemcpy(rawfield, gfield, sizeof(OutputType)*fieldlen * SHADOWCOUNT, cudaMemcpyDeviceToHost));
-                MCX_FPRINTF(cfg->flog, "%s:\t%d ms\n", T_("transfer complete"), GetTimeMillis() - tic);
+                MCX_FPRINTF(cfg->flog, "transfer complete:\t%d ms\n", GetTimeMillis() - tic);
                 fflush(cfg->flog);
 
                 /**
@@ -3684,18 +3517,18 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                  * single-precision output, we need to copy and accumulate two separate floating-point buffers
                  * to minimize round-off errors near the source
                  */
-                for (i = 0; i < fieldlen; i++) { //accumulate field, can be done in the GPU
+                for (i = 0; i < (int)fieldlen; i++) { //accumulate field, can be done in the GPU
                     field[i] = rawfield[i];
 #ifndef USE_DOUBLE
 
-                    if (cfg->outputtype != otRF && cfg->outputtype != otRFmus) {
+                    if (cfg->outputtype != otRF) {
                         field[i] += rawfield[i + fieldlen];
                     }
 
 #endif
                 }
 
-                if ((cfg->outputtype == otRF || cfg->outputtype == otRFmus) && cfg->omega > 0.f && SHADOWCOUNT == 2) {
+                if (cfg->outputtype == otRF && cfg->omega > 0.f && SHADOWCOUNT == 2) {
                     rfimag = (OutputType*)malloc(fieldlen * sizeof(OutputType));
                     memcpy(rfimag, rawfield + fieldlen, fieldlen * sizeof(OutputType));
                 }
@@ -3706,7 +3539,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                  * If respin is used, each repeatition is accumulated to the 2nd half of the buffer
                  */
                 if (ABS(cfg->respin) > 1) {
-                    for (i = 0; i < fieldlen; i++) { //accumulate field, can be done in the GPU
+                    for (i = 0; i < (int)fieldlen; i++) { //accumulate field, can be done in the GPU
                         field[fieldlen + i] += field[i];
                     }
                 }
@@ -3746,14 +3579,12 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
          * For MATLAB mex file, the data is copied to a pre-allocated buffer \c cfg->export* as a return variable
          */
         if (cfg->exportfield) {
-            size_t i;
-
-            for (i = 0; i < fieldlen; i++)
+            for (i = 0; i < (int)fieldlen; i++)
                 #pragma omp atomic
                 cfg->exportfield[i] += field[i];
 
-            if ((cfg->outputtype == otRF || cfg->outputtype == otRFmus) && rfimag) {
-                for (i = 0; i < fieldlen; i++)
+            if (cfg->outputtype == otRF && rfimag) {
+                for (i = 0; i < (int)fieldlen; i++)
                     #pragma omp atomic
                     cfg->exportfield[i + fieldlen] += rfimag[i];
             }
@@ -3775,15 +3606,11 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
      */
     #pragma omp master
     {
-        if (cfg->issave2pt && (cfg->srctype == MCX_SRC_PATTERN || cfg->srctype == MCX_SRC_PATTERN3D) && cfg->srcnum > 1) { // post-processing only for multi-srcpattern
+        if (cfg->issave2pt && cfg->srctype == MCX_SRC_PATTERN && cfg->srcnum > 1) { // post-processing only for multi-srcpattern
             srcpw = (float*)calloc(cfg->srcnum, sizeof(float));
             energytot = (float*)calloc(cfg->srcnum, sizeof(float));
             energyabs = (float*)calloc(cfg->srcnum, sizeof(float));
             int psize = (int)cfg->srcparam1.w * (int)cfg->srcparam2.w;
-
-            if (cfg->srctype == MCX_SRC_PATTERN3D) {
-                psize = (int)cfg->srcparam1.x * (int)cfg->srcparam1.y * (int)cfg->srcparam1.z;
-            }
 
             for (i = 0; i < int(cfg->srcnum); i++) {
                 float kahanc = 0.f;
@@ -3796,16 +3623,16 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                 kahanc = 0.f;
 
                 if (cfg->outputtype == otEnergy) {
-                    size_t j, fieldlenPsrc = fieldlen / cfg->srcnum;
+                    int fieldlenPsrc = fieldlen / cfg->srcnum;
 
-                    for (j = 0; j < fieldlenPsrc; j++) {
-                        mcx_kahanSum(&energyabs[i], &kahanc, cfg->exportfield[j * cfg->srcnum + i]);
+                    for (iter = 0; iter < fieldlenPsrc; iter++) {
+                        mcx_kahanSum(&energyabs[i], &kahanc, cfg->exportfield[iter * cfg->srcnum + i]);
                     }
                 } else {
-                    size_t j;
+                    int j;
 
-                    for (iter = 0; iter < (int)gpu[gpuid].maxgate; iter++)
-                        for (j = 0; j < dimlen.z; j++) {
+                    for (iter = 0; iter < gpu[gpuid].maxgate; iter++)
+                        for (j = 0; j < (int)dimlen.z; j++) {
                             mcx_kahanSum(&energyabs[i], &kahanc, cfg->exportfield[iter * dimxyz + (j * cfg->srcnum + i)]*mcx_updatemua((uint)cfg->vol[j], cfg));
                         }
                 }
@@ -3824,7 +3651,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
             float* scale = (float*)calloc(cfg->srcnum, sizeof(float));
             scale[0] = 1.f;
             int isnormalized = 0;
-            MCX_FPRINTF(cfg->flog, "%s\t", T_("normalizing raw data ..."));
+            MCX_FPRINTF(cfg->flog, "normalizing raw data ...\t");
             cfg->energyabs += cfg->energytot - cfg->energyesc;
 
             /**
@@ -3839,7 +3666,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                 }
             } else if (cfg->outputtype == otEnergy || cfg->outputtype == otL) { /** If output is energy (joule), raw data is simply multiplied by 1/Nphoton */
                 scale[0] = 1.f / cfg->energytot;
-            } else if (cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS || cfg->outputtype == otRF || cfg->outputtype == otRFmus || cfg->outputtype == otWLTOF || cfg->outputtype == otWPTOF) {
+            } else if (cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS || cfg->outputtype == otRF) {
                 if (cfg->seed == SEED_FROM_FILE && cfg->replaydet == -1) {
                     int detid;
 
@@ -3848,26 +3675,22 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                             scale[0] = 0.f; // the cfg->normalizer and cfg.his.normalizer are inaccurate in this case, but this is ok
 
                             for (size_t i = 0; i < cfg->nphoton; i++)
-                                if ((cfg->replay.detid[i] & 0xFFFF) == detid) {
+                                if (cfg->replay.detid[i] == detid) {
                                     scale[0] += cfg->replay.weight[i];
                                 }
 
                             if (scale[0] > 0.f) {
-                                scale[0] = 1.0f / scale[0];
-
-                                if (cfg->outputtype == otJacobian || cfg->outputtype == otRF || cfg->outputtype == otWLTOF) {
-                                    scale[0] = cfg->unitinmm * scale[0]; // only paths in voxel units need scaling
-                                }
+                                scale[0] = cfg->unitinmm / scale[0];
                             }
-                        } else if (cfg->outputtype == otJacobian || cfg->outputtype == otRF || cfg->outputtype == otWLTOF) {
+                        } else {
                             scale[0] = cfg->unitinmm;
                         }
 
-                        MCX_FPRINTF(cfg->flog, "%s %d alpha=%f\n", T_("normalization factor for detector"), detid, scale[0]);
+                        MCX_FPRINTF(cfg->flog, "normalization factor for detector %d alpha=%f\n", detid, scale[0]);
                         fflush(cfg->flog);
                         mcx_normalize(cfg->exportfield + (detid - 1)*dimxyz * gpu[gpuid].maxgate, scale[0], dimxyz * gpu[gpuid].maxgate, cfg->isnormalized, 0, 1);
 
-                        if (cfg->outputtype == otRF || cfg->outputtype == otRFmus) {
+                        if (cfg->outputtype == otRF) {
                             mcx_normalize(cfg->exportfield + fieldlen + (detid - 1)*dimxyz * gpu[gpuid].maxgate, scale[0], dimxyz * gpu[gpuid].maxgate, cfg->isnormalized, 0, 1);
                         }
                     }
@@ -3884,7 +3707,7 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
                         scale[0] = cfg->unitinmm / scale[0];
                     }
 
-                    MCX_FPRINTF(cfg->flog, "%s %d alpha=%f\n", T_("normalization factor for detector"), cfg->replaydet, scale[0]);
+                    MCX_FPRINTF(cfg->flog, "normalization factor for detector %d alpha=%f\n", cfg->replaydet, scale[0]);
                     fflush(cfg->flog);
                 }
             }
@@ -3892,13 +3715,9 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
             /**
              * In photon sharing mode, where multiple pattern sources are simulated, each solution is normalized separately
              */
-            if ((cfg->srctype == MCX_SRC_PATTERN || cfg->srctype == MCX_SRC_PATTERN3D) && cfg->srcnum > 1) { // post-processing only for multi-srcpattern
+            if (cfg->srctype == MCX_SRC_PATTERN && cfg->srcnum > 1) { // post-processing only for multi-srcpattern
                 float scaleref = scale[0];
                 int psize = (int)cfg->srcparam1.w * (int)cfg->srcparam2.w;
-
-                if (cfg->srctype == MCX_SRC_PATTERN3D) {
-                    psize = (int)cfg->srcparam1.x * (int)cfg->srcparam1.y * (int)cfg->srcparam1.z;
-                }
 
                 for (i = 0; i < int(cfg->srcnum); i++) {
                     scale[i] = psize / srcpw[i] * scaleref;
@@ -3914,14 +3733,14 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
 
             if (!isnormalized) {
                 for (i = 0; i < (int)cfg->srcnum; i++) {
-                    MCX_FPRINTF(cfg->flog, "%s %d, %s alpha=%f\n", T_("source"), (i + 1), T_("normalization factor"), scale[i]);
+                    MCX_FPRINTF(cfg->flog, "source %d, normalization factor alpha=%f\n", (i + 1), scale[i]);
                     fflush(cfg->flog);
-                    mcx_normalize(cfg->exportfield, scale[i], fieldlen / cfg->srcnum * ((cfg->outputtype == otRF || cfg->outputtype == otRFmus) + 1), cfg->isnormalized, i, cfg->srcnum);
+                    mcx_normalize(cfg->exportfield, scale[i], fieldlen / cfg->srcnum * ((cfg->outputtype == otRF) + 1), cfg->isnormalized, i, cfg->srcnum);
                 }
             }
 
             free(scale);
-            MCX_FPRINTF(cfg->flog, "%s : %d ms\n", T_("data normalization complete"), GetTimeMillis() - tic);
+            MCX_FPRINTF(cfg->flog, "data normalization complete : %d ms\n", GetTimeMillis() - tic);
         }
 
         /**
@@ -3932,9 +3751,9 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
 #ifndef MCX_CONTAINER
 
         if (cfg->issave2pt && cfg->parentid == mpStandalone) {
-            MCX_FPRINTF(cfg->flog, "%s ... \t", T_("saving data to file"));
+            MCX_FPRINTF(cfg->flog, "saving data to file ...\t");
             mcx_savedata(cfg->exportfield, fieldlen, cfg);
-            MCX_FPRINTF(cfg->flog, "%s : %d ms\n\n", T_("saving data complete"), GetTimeMillis() - tic);
+            MCX_FPRINTF(cfg->flog, "saving data complete : %d ms\n\n", GetTimeMillis() - tic);
             fflush(cfg->flog);
         }
 
@@ -4006,23 +3825,21 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
         /**
          * Report simulation summary, total energy here equals total simulated photons+unfinished photons for all threads
          */
-        MCX_FPRINTF(cfg->flog, "%s %.0f %s (%.0f) with %d threads (repeat x%d)\n%s: " S_BOLD "" S_BLUE "%.2f photon/ms\n" S_RESET,
-                    T_("simulated"), (double)cfg->nphoton * ((cfg->respin > 1) ? (cfg->respin) : 1), T_("photons"), (double)cfg->nphoton * ((cfg->respin > 1) ? (cfg->respin) : 1),
-                    gpu[gpuid].autothread, ABS(cfg->respin), T_("MCX simulation speed"),
+        MCX_FPRINTF(cfg->flog, "simulated %ld photons (%ld) with %d threads (repeat x%d)\nMCX simulation speed: " S_BOLD "" S_BLUE "%.2f photon/ms\n" S_RESET,
+                    (long int)cfg->nphoton * ((cfg->respin > 1) ? (cfg->respin) : 1), (long int)cfg->nphoton * ((cfg->respin > 1) ? (cfg->respin) : 1),
+                    gpu[gpuid].autothread, ABS(cfg->respin),
                     ((cfg->issavedet == FILL_MAXDETPHOTON) ? cfg->energytot : ((double)cfg->nphoton * ((cfg->respin > 1) ? (cfg->respin) : 1))) / max(1, cfg->runtime));
         fflush(cfg->flog);
 
-        if (cfg->issave2pt && (cfg->srctype == MCX_SRC_PATTERN || cfg->srctype == MCX_SRC_PATTERN3D) && cfg->srcnum > 1) {
+        if (cfg->srctype == MCX_SRC_PATTERN && cfg->srcnum > 1) {
             for (i = 0; i < (int)cfg->srcnum; i++) {
-                MCX_FPRINTF(cfg->flog, "source #%d %s: %.2f\t%s: " S_BOLD "" S_BLUE "%5.5f%%" S_RESET"\n(%s)\n",
-                            i + 1, T_("total simulated energy"), energytot[i], T_("absorbed"), energyabs[i] / energytot[i] * 100.f,
-                            T_("loss due to initial specular reflection is excluded in the total"));
+                MCX_FPRINTF(cfg->flog, "source #%d total simulated energy: %.2f\tabsorbed: " S_BOLD "" S_BLUE "%5.5f%%" S_RESET"\n(loss due to initial specular reflection is excluded in the total)\n",
+                            i + 1, energytot[i], energyabs[i] / energytot[i] * 100.f);
                 fflush(cfg->flog);
             }
         } else {
-            MCX_FPRINTF(cfg->flog, "%s: %.2f\t%s: " S_BOLD "" S_BLUE "%5.5f%%" S_RESET"\n(%s)\n",
-                        T_("total simulated energy"), cfg->energytot, T_("absorbed"), (cfg->energytot - cfg->energyesc) / cfg->energytot * 100.f,
-                        T_("loss due to initial specular reflection is excluded in the total"));
+            MCX_FPRINTF(cfg->flog, "total simulated energy: %.2f\tabsorbed: " S_BOLD "" S_BLUE "%5.5f%%" S_RESET"\n(loss due to initial specular reflection is excluded in the total)\n",
+                        cfg->energytot, (cfg->energytot - cfg->energyesc) / cfg->energytot * 100.f);
             fflush(cfg->flog);
             fflush(cfg->flog);
         }
@@ -4098,13 +3915,6 @@ void mcx_run_simulation(Config* cfg, GPUInfo* gpu) {
     free(energy);
     free(field);
     free(srcpw);
-
-    if (energytot) {
-        free(energytot);
-    }
-
-    if (energyabs) {
-        free(energyabs);
-    }
-
+    free(energytot);
+    free(energyabs);
 }

@@ -1,2 +1,10 @@
 Rakefile
 *.o
+*.logs
+*.log
+*.bin
+*.obj
+*.jdat
+*.jnii
+*.txt
+*.svmc

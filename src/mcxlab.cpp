@@ -2,7 +2,7 @@
 **  \mainpage Monte Carlo eXtreme - GPU accelerated Monte Carlo Photon Migration
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2009-2025
+**  \copyright Qianqian Fang, 2009-2024
 **
 **  \section sref Reference
 **  \li \c (\b Fang2009) Qianqian Fang and David A. Boas,
@@ -41,8 +41,8 @@
 #include "mcx_const.h"
 #include "mcx_utils.h"
 #include "mcx_core.h"
+#include "mcx_svmc.h"
 #include "mcx_shapes.h"
-#include "mcx_lang.h"
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -78,8 +78,6 @@
 #define SET_GPU_INFO(output,id,v)  mxSetField(output,id,#v,mxCreateDoubleScalar(gpuinfo[i].v));
 
 typedef mwSize dimtype;
-
-extern cJSON* mcx_lang;
 
 void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cfg);
 void mcxlab_usage();
@@ -262,15 +260,28 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                 mexErrMsgTxt("No active GPU device found");
             }
 
+            /** Preprocess volume on GPU for SVMC simulation */
+            //mcx_svmc_preprocess(&cfg, gpuinfo);
+            if (cfg.issvmc) {
+                printf("[MCXLAB Debug] issvmc=%d, use_surfacenets=%d\n", cfg.issvmc, cfg.use_surfacenets);
+                if (cfg.use_surfacenets) {
+                    printf("[MCXLAB Debug] Calling mcx_svmc_preprocess_surfacenets()\n");
+                    mcx_svmc_preprocess_surfacenets(&cfg, gpuinfo);
+                } else {
+                    printf("[MCXLAB Debug] Calling mcx_svmc_preprocess() (MC mode)\n");
+                    mcx_svmc_preprocess(&cfg, gpuinfo);
+                }
+            }
+
             /** Initialize all buffers necessary to store the output variables */
-            if (nlhs >= 1 && cfg.issave2pt) {
-                size_t fieldlen = cfg.dim.x * cfg.dim.y * cfg.dim.z * (int)((cfg.tend - cfg.tstart) / cfg.tstep + 0.5) * cfg.srcnum;
+            if (nlhs >= 1) {
+                int fieldlen = cfg.dim.x * cfg.dim.y * cfg.dim.z * (int)((cfg.tend - cfg.tstart) / cfg.tstep + 0.5) * cfg.srcnum;
 
                 if (cfg.replay.seed != NULL && cfg.replaydet == -1) {
                     fieldlen *= cfg.detnum;
                 }
 
-                if (cfg.replay.seed != NULL && (cfg.outputtype == otRF || cfg.outputtype == otRFmus)) {
+                if (cfg.replay.seed != NULL && cfg.outputtype == otRF) {
                     fieldlen *= 2;
                 }
 
@@ -395,7 +406,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
             /** if the 1st output presents, output the fluence/energy-deposit volume data */
             if (nlhs >= 1) {
-                size_t fieldlen;
+                int fieldlen;
                 fielddim[0] = cfg.srcnum * cfg.dim.x;
                 fielddim[1] = cfg.dim.y;
                 fielddim[2] = cfg.dim.z;
@@ -405,7 +416,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                     fielddim[4] = cfg.detnum;
                 }
 
-                if (cfg.replay.seed != NULL && (cfg.outputtype == otRF || cfg.outputtype == otRFmus)) {
+                if (cfg.replay.seed != NULL && cfg.outputtype == otRF) {
                     fielddim[5] = 2;
                 }
 
@@ -413,16 +424,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                     fielddim[5] *= (cfg.extrasrclen + 1);
                 }
 
-                fieldlen = (size_t)fielddim[0] * fielddim[1] * fielddim[2] * fielddim[3] * fielddim[4] * fielddim[5];
+                fieldlen = fielddim[0] * fielddim[1] * fielddim[2] * fielddim[3] * fielddim[4] * fielddim[5];
 
-                if (cfg.issaveref && cfg.exportfield) {
+                if (cfg.issaveref) {
                     int highdim = fielddim[3] * fielddim[4] * fielddim[5];
-                    size_t voxellen = cfg.dim.x * cfg.dim.y * cfg.dim.z;
+                    int voxellen = cfg.dim.x * cfg.dim.y * cfg.dim.z;
                     float* dref = (float*)malloc(fieldlen * sizeof(float));
-
                     memcpy(dref, cfg.exportfield, fieldlen * sizeof(float));
 
-                    for (size_t voxelid = 0; voxelid < voxellen; voxelid++) {
+                    for (int voxelid = 0; voxelid < voxellen; voxelid++) {
                         if (cfg.vol[voxelid]) {
                             for (int gate = 0; gate < highdim; gate++)
                                 for (int srcid = 0; srcid < cfg.srcnum; srcid++) {
@@ -442,16 +452,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                     free(dref);
                 }
 
-                if (cfg.issave2pt && cfg.exportfield) {
+                if (cfg.issave2pt) {
                     mxSetFieldByNumber(plhs[0], jstruct, 0, mxCreateNumericArray(((fielddim[5] > 1) ? 6 : (4 + (fielddim[4] > 1))), fielddim, mxSINGLE_CLASS, mxREAL));
                     memcpy((float*)mxGetPr(mxGetFieldByNumber(plhs[0], jstruct, 0)), cfg.exportfield,
                            fieldlen * sizeof(float));
                 }
 
-                if (cfg.exportfield) {
-                    free(cfg.exportfield);
-                }
-
+                free(cfg.exportfield);
                 cfg.exportfield = NULL;
 
                 /** also return the run-time info in outut.runtime */
@@ -567,6 +574,13 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
     GET_ONE_FIELD(cfg, isref3)
     GET_ONE_FIELD(cfg, isrefint)
     GET_ONE_FIELD(cfg, isnormalized)
+    //GET_ONE_FIELD(cfg, issvmc)
+    if (strcmp(name, "issvmc") == 0) {
+        int mode = (int)(*mxGetPr(item));
+        cfg->issvmc = (mode > 0);
+        cfg->use_surfacenets = (mode == 2);
+        printf("mcx.issvmc=%d; (use_surfacenets=%d)\n", mode, cfg->use_surfacenets);
+    }
     GET_ONE_FIELD(cfg, isgpuinfo)
     GET_ONE_FIELD(cfg, issrcfrom0)
     GET_ONE_FIELD(cfg, autopilot)
@@ -740,7 +754,7 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
         cfg->mediabyte = 0;
         arraydim = mxGetDimensions(item);
 
-        if (mxGetNumberOfDimensions(item) <= 3) {
+        if (mxGetNumberOfDimensions(item) == 3) {
             if (mxIsUint8(item) || mxIsInt8(item)) { // input is a 3D byte array
                 cfg->mediabyte = 1;
             } else if (mxIsUint16(item) || mxIsInt16(item)) { // input is a 3D short array
@@ -753,14 +767,9 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
                 cfg->mediabyte = 14;
             }
 
-            for (i = 0; i < mxGetNumberOfDimensions(item); i++) {
+            for (i = 0; i < 3; i++) {
                 ((unsigned int*)(&cfg->dim))[i] = arraydim[i];
             }
-
-            if (i < 3) {
-                cfg->dim.z = 1;
-            }
-
         } else if (mxGetNumberOfDimensions(item) == 4) { // if dimension is 4D, 1st dim is the property records: mua/mus/g/n
             if ((mxIsUint8(item) || mxIsInt8(item)) && arraydim[0] == 4) { // if 4D byte array has a 1st dim of 4
                 cfg->mediabyte = MEDIA_ASGN_BYTE;
@@ -1054,7 +1063,7 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
         printf("mcx.srctype='%s';\n", strtypestr);
     } else if (strcmp(name, "outputtype") == 0) {
         int len = mxGetNumberOfElements(item);
-        const char* outputtype[] = {"flux", "fluence", "energy", "jacobian", "nscat", "wl", "wp", "wm", "rf", "length", "rfmus", "wltof", "wptof", ""};
+        const char* outputtype[] = {"flux", "fluence", "energy", "jacobian", "nscat", "wl", "wp", "wm", "rf", "length", ""};
         char outputstr[MAX_SESSION_LENGTH] = {'\0'};
 
         if (!mxIsChar(item) || len == 0) {
@@ -1133,12 +1142,8 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
         arraydim = mxGetDimensions(item);
         dimtype dimz = 1;
 
-        if (mxGetNumberOfDimensions(item) >= 3) {
+        if (mxGetNumberOfDimensions(item) == 3) {
             dimz = arraydim[2];
-        }
-
-        if (mxGetNumberOfDimensions(item) == 4) {
-            dimz *= arraydim[3];
         }
 
         double* val = mxGetPr(item);
@@ -1175,7 +1180,7 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
 
         cfg->invcdf[0] = -1.f;
         cfg->invcdf[cfg->nphase - 1] = 1.f;
-        printf("mcx.invcdf=[%d];\n", cfg->nphase);
+        printf("mcx.invcdf=[%ld];\n", cfg->nphase);
     } else if (strcmp(name, "angleinvcdf") == 0) {
         dimtype nangle = mxGetNumberOfElements(item);
         double* val = mxGetPr(item);
@@ -1195,7 +1200,7 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
             }
         }
 
-        printf("mcx.angleinvcdf=[%d];\n", cfg->nangle);
+        printf("mcx.angleinvcdf=[%ld];\n", cfg->nangle);
     } else if (strcmp(name, "shapes") == 0) {
         int len = mxGetNumberOfElements(item);
 
@@ -1302,56 +1307,6 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
         }
 
         printf("mcx.workload=<<%ld>>;\n", arraydim[0]*arraydim[1]);
-    } else if (strcmp(name, "flog") == 0) {
-        int len = mxGetNumberOfElements(item);
-        char logfile[MAX_SESSION_LENGTH] = {'\0'};
-
-        if (mxIsChar(item)) {
-            if (len > 0) {
-                mxGetString(item, logfile, MAX_SESSION_LENGTH);
-                cfg->flog = fopen(logfile, "a+");
-
-                if (cfg->flog == NULL) {
-                    mexErrMsgTxt("Log output file can not be written");
-                }
-            } else {
-                cfg->flog = stdout;
-            }
-        } else {
-            double* val = mxGetPr(item);
-
-            if (len > 0 && val[0] <= 2) {
-                cfg->flog = ((int)val[0] == 2 ? stderr : ((int)val[0] == 1 ? stdout : (cfg->printnum = -1, stdout)));
-            }
-        }
-
-        printf("mcx.flog=%d;\n", cfg->flog);
-    } else if (strcmp(name, "lang") == 0) {
-        int len = mxGetNumberOfElements(item);
-        char langid[32] = {'\0'};
-
-        if (!mxIsChar(item) || len == 0) {
-            mexErrMsgTxt("the 'lang' field must be a non-empty string");
-        }
-
-        if (len > 5) {
-            mexErrMsgTxt("the 'lang' field is too long");
-        }
-
-        int status = mxGetString(item, langid, 32);
-
-        if (status != 0) {
-            mexWarnMsgTxt("not enough space. string is truncated.");
-        }
-
-        int idx = mcx_keylookup(langid, languagename);
-
-        if (idx == -1) {
-            mexErrMsgTxt(T_("Unsupported language"));
-        }
-
-        mcx_lang = cJSON_Parse(translations[idx]);
-        printf("mcx.lang='%s';\n", langid);
     } else {
         printf(S_RED "WARNING: redundant field '%s'\n" S_RESET, name);
     }

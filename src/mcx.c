@@ -2,7 +2,7 @@
 **  \mainpage Monte Carlo eXtreme - GPU accelerated Monte Carlo Photon Migration
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2009-2025
+**  \copyright Qianqian Fang, 2009-2024
 **
 **  \section sref Reference
 **  \li \c (\b Fang2009) Qianqian Fang and David A. Boas,
@@ -36,6 +36,7 @@
 #include "mcx_tictoc.h"
 #include "mcx_utils.h"
 #include "mcx_core.h"
+#include "mcx_svmc.h"
 #ifdef _OPENMP
     #include <omp.h>
 #endif
@@ -62,6 +63,19 @@ int main (int argc, char* argv[]) {
     if (!(activedev = mcx_list_gpu(&mcxconfig, &gpuinfo))) {
         mcx_error(-1, "No GPU device found\n", __FILE__, __LINE__);
     }
+
+    /**
+     * Preprocess volume on GPU for SVMC simulation
+     */
+    if (mcxconfig.issvmc) {
+        if (mcxconfig.use_surfacenets) {
+            //mcx_svmc_preprocess_sn(&mcxconfig, gpuinfo);
+            mcx_svmc_preprocess_surfacenets(&mcxconfig, gpuinfo);
+        } else {
+            mcx_svmc_preprocess(&mcxconfig, gpuinfo);
+        }
+    }
+
 
 #ifdef _OPENMP
     /**

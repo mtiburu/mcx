@@ -2,7 +2,7 @@
 **  \mainpage Monte Carlo eXtreme - GPU accelerated Monte Carlo Photon Migration
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2009-2025
+**  \copyright Qianqian Fang, 2009-2024
 **
 **  \section sref Reference
 **  \li \c (\b Fang2009) Qianqian Fang and David A. Boas,
@@ -35,8 +35,8 @@
 #include "mcx_bench.h"
 
 #define MSTR(...) #__VA_ARGS__
-
-const char *benchname[MAX_MCX_BENCH]={"cube60","cube60b","cube60planar","cubesph60b","onecube","twocube","skinvessel","sphshells","spherebox",
+//"cube60","cube60b","cube60planar","cubesph60b","skinvessel","sphshells","spherebox",
+const char *benchname[MAX_MCX_BENCH]={"tspheres","mallet","cube60","zlayer_sphere60","multisphere60","touch60t","touch60","cube60b","cube60planar","cubesph60b","skinvessel","sphshells","spherebox",
 #ifndef _MSC_VER
 			 "colin27",""};
 #else
@@ -47,57 +47,305 @@ const char *benchjson[MAX_MCX_BENCH]={
 MSTR(
 {
     "Session": {
-	"ID":       "cube60",
-	"Photons":  1e6,
-	"RNGSeed":  1648335518,
-	"DoMismatch": 0
+        "ID": "tspheres",
+        "Photons": 5000000,
+        "RNGSeed": 20260129,
+        "DoMismatch": true
     },
     "Domain": {
-        "Dim":    [60,60,60],
+        "Dim": [64, 64, 64],
         "OriginType": 1,
         "Media": [
-             {"mua": 0, "mus": 0, "g": 1, "n": 1},
-             {"mua": 0.005,"mus": 1.0, "g": 0.01, "n": 1.37},
-             {"mua": 0.002,"mus": 5, "g": 0.90, "n": 1}
+            { "mua": 0.00, "mus": 0.0,  "g": 1.0, "n": 1.0  },  
+            { "mua": 0.05, "mus": 10.0, "g": 0.9, "n": 1.37 }, 
+            { "mua": 0.15, "mus": 20.0, "g": 0.9, "n": 1.45 }   
         ]
     },
     "Shapes": [
-        {"Name":     "cubic60"},
-        {"Origin":   [0,0,0]},
-        {"Grid":     {"Tag":1, "Size":[60,60,60]}}
+        { "Grid": { "Tag": 0, "Size": [64, 64, 64] } },
+
+        {
+            "Sphere": {
+                "Tag": 1,
+                "O": [24.0, 32.0, 32.0],
+                "R": 20.0
+            }
+        },
+        {
+            "Sphere": {
+                "Tag": 2,
+                "O": [40.0, 32.0, 32.0],
+                "R": 20.0
+            }
+        }
     ],
     "Forward": {
-	"T0": 0.0e+00,
-	"T1": 5.0e-09,
-	"Dt": 5.0e-09
+        "T0": 0,
+        "T1": 5e-9,
+        "Dt": 5e-9
     },
+
     "Optode": {
-	"Source": {
-	    "Type":"pencil",
-	    "Pos": [29.0, 29.0, 0.0],
-	    "Dir": [0.0, 0.0, 1.0]
-	},
-	"Detector": [
-	    {
-		"Pos": [29.0,  19.0,  0.0],
-		"R": 1.0
-	    },
-            {
-                "Pos": [29.0,  39.0,  0.0],
-                "R": 1.0
-            },
-            {
-                "Pos": [19.0,  29.0,  0.0],
-                "R": 1.0
-            },
-            {
-                "Pos": [39.0,  29.0,  0.0],
-                "R": 1.0
+        "Source": {
+            "Type": "pencil",
+            "Pos":  [32.0, 32.0, 0.0],
+            "Dir":  [0.0, 0.0, 1.0]
+        },
+        "Detector": [
+            { "Pos": [32.0, 32.0, 63.9], "R": 25.0 }
+        ]
+    }
+}),
+MSTR(
+{
+    "Session": {
+        "ID": "mallet",
+        "Photons": 5000000,
+        "RNGSeed": 20260129,
+        "DoMismatch": true
+    },
+    "Domain": {
+        "Dim": [80, 80, 80],
+        "OriginType": 1,
+        "Media": [
+            { "mua": 0.00, "mus": 0.0,  "g": 1.0, "n": 1.0  },
+            { "mua": 0.05, "mus": 10.0, "g": 0.9, "n": 1.37 },
+            { "mua": 0.15, "mus": 20.0, "g": 0.9, "n": 1.45 }
+        ]
+    },
+
+    "Shapes": [
+        { "Grid": { "Tag": 0, "Size": [80, 80, 80] } },
+        {
+            "Cylinder": {
+                "Tag": 1,
+                "C0": [40.0, 40.0, 10.0],
+                "C1": [40.0, 40.0, 55.0],
+                "R": 5.0
             }
-	]
+        },
+        {
+            "Sphere": {
+                "Tag": 2,
+                "O": [40.0, 40.0, 60.0],
+                "R": 15.0
+            }
+        }
+    ],
+
+    "Forward": {
+        "T0": 0,
+        "T1": 5e-9,
+        "Dt": 5e-9
+    },
+
+    "Optode": {
+        "Source": {
+            "Type": "pencil",
+            "Pos":  [40.0, 40.0, 0.0],
+            "Dir":  [0.0, 0.0, 1.0]
+        },
+        "Detector": [
+            { "Pos": [40.0, 40.0, 79.9], "R": 30.0 }
+        ]
     }
 }),
 
+MSTR(
+{
+    "Session": {
+        "ID": "zlayer_sphere60",
+        "Photons": 1e6,
+        "RNGSeed": 1648335518,
+        "DoMismatch": true
+    },
+    "Domain": {
+        "Dim": [60,60,60],
+        "OriginType": 1,
+        "Media": [
+            {"mua":0.00,"mus":0.0,"g":1.00,"n":1.0},
+            {"mua":0.02,"mus":0.1,"g":0.9,"n":1.37},
+            {"mua":0.02,"mus":10.0,"g":0.9,"n":1.0},
+            {"mua":0.10,"mus":0.5,"g":0.0,"n":1.2}
+        ]
+    },
+    "Shapes":[
+        {"Name":"zlayer_sphere60"},
+        {"Origin":[0,0,0]},
+        {"Grid":{"Tag":1,"Size":[60,60,60]}},
+
+        {"ZLayers":[
+            [1,30,1],
+            [31,50,2],
+            [51,60,0]
+        ]},
+
+        {"Sphere":{"Tag":3,"O":[30,30,30],"R":25}}
+    ],
+    "Forward": {
+        "T0":0.0e+00,
+        "T1":5.0e-09,
+        "Dt":5.0e-09
+    },
+    "Optode":{
+        "Source":{"Type":"pencil","Pos":[29,29,0],"Dir":[0,0,1]},
+        "Detector":[
+            {"Pos":[29,19,0],"R":1},
+            {"Pos":[29,39,0],"R":1},
+            {"Pos":[19,29,0],"R":1},
+            {"Pos":[39,29,0],"R":1}
+        ]
+    }
+}),
+
+MSTR(
+{
+    "Session": {
+        "ID": "multisphere60",
+        "Photons": 1e6,
+        "RNGSeed": 1648335518,
+        "DoMismatch": true
+    },
+    "Domain": {
+        "Dim": [60,60,60],
+        "OriginType": 1,
+        "Media": [
+            {"mua":0.01,"mus":1.0,"g":0.90,"n":1.00},
+            {"mua":0.02,"mus":2.0,"g":0.90,"n":1.37},
+            {"mua":0.03,"mus":3.0,"g":0.90,"n":1.20},
+            {"mua":0.04,"mus":4.0,"g":0.90,"n":1.50}
+        ]
+    },
+    "Shapes":[
+        {"Name":"multisphere60"},
+        {"Origin":[0,0,0]},
+        {"Grid":{"Tag":1,"Size":[60,60,60]}},
+
+        {"Sphere":{"Tag":1,"O":[30,30,30],"R":20}},
+        {"Sphere":{"Tag":2,"O":[25,25,25],"R":10}},
+        {"Sphere":{"Tag":3,"O":[35,35,35],"R":10}}
+    ],
+    "Forward":{
+        "T0":0.0e+00,
+        "T1":5.0e-09,
+        "Dt":5.0e-09
+    },
+    "Optode":{
+        "Source":{"Type":"pencil","Pos":[29,29,0],"Dir":[0,0,1]},
+        "Detector":[
+            {"Pos":[29,19,0],"R":1},
+            {"Pos":[29,39,0],"R":1},
+            {"Pos":[19,29,0],"R":1},
+            {"Pos":[39,29,0],"R":1}
+        ]
+    }
+}),
+
+MSTR(
+{
+    "Session": {
+        "ID": "touch60t",
+        "Photons": 5000000,
+        "RNGSeed": 20241130,
+        "DoMismatch": true
+    },
+    "Domain": {
+        "Dim": [64, 64, 64],
+        "OriginType": 1,
+        "Media": [
+            { "mua": 0.00, "mus": 0.0,  "g": 1.0, "n": 1.0  },  
+            { "mua": 0.05, "mus": 10.0, "g": 0.9, "n": 1.37 }, 
+            { "mua": 0.15, "mus": 30.0, "g": 0.9, "n": 1.45 }   
+        ]
+    },
+
+    "Shapes": [
+        { "Grid": { "Tag": 0, "Size": [64, 64, 64] } },
+
+        {
+            "Box": {
+                "Tag": 1,
+                "O":    [10.0, 20.0, 20.0],
+                "Size": [32, 22, 22]
+            }
+        },
+        {
+            "Cylinder": {
+                "Tag": 2,
+                "C0":  [42.1, 31.0, 31.0],
+                "C1":  [58.0, 31.0, 31.0],
+                "R":   20
+            }
+        }
+    ],
+
+    "Forward": {
+        "T0": 0,
+        "T1": 5e-9,
+        "Dt": 5e-9
+    },
+
+    "Optode": {
+        "Source": {
+            "Type": "pencil",
+            "Pos":  [29.5, 29.5, 0.0],
+            "Dir":  [0.0, 0.0, 1.0]
+        },
+        "Detector": [
+            { "Pos": [29.5, 29.5, 59.9], "R": 25.0 }
+        ]
+    }
+}),
+
+MSTR(
+{
+    "Session": {
+        "ID": "touch60",
+        "Photons": 5000000,
+        "RNGSeed": 20241130,
+        "DoMismatch": true
+    },
+    "Domain": {
+        "Dim": [64,64,64],
+        "OriginType": 1,
+        "Media": [
+            {"mua":0.00, "mus":0.0,  "g":1.0, "n":1.0},   // 0 background
+            {"mua":0.05, "mus":10.0, "g":0.9, "n":1.37},  // 1 cube
+            {"mua":0.10, "mus":20.0, "g":0.9, "n":1.40},  // 2 sphere
+            {"mua":0.15, "mus":30.0, "g":0.9, "n":1.45}   // 3 cylinder
+        ]
+    },
+    "Shapes": [
+        {"Grid": {"Tag":0, "Size":[64,64,64]}},
+
+        // 1. Cube: from x=10 to x=30 (20 units wide), centered in y/z
+        {"Box": {
+            "Tag":1,
+            "O": [10, 20, 20],
+            "Size": [20.1, 20, 20]
+        }},
+
+        // 2. Sphere: radius = 15, center at x=30 → touches cube face EXACTLY at x=30
+        {"Sphere": {
+            "Tag":2,
+            "O": [30, 30, 30],
+            "R": 15.1
+        }},
+
+        // 3. Cylinder: touches sphere at x=45, axis along x, radius 10
+        {"Cylinder": {
+            "Tag":3,
+            "C0": [44.9, 30, 30],  // start at x=44.9 (touch sphere at x=45)
+            "C1": [55, 30, 30],  // end at x=55
+            "R": 10.2
+        }}
+    ],
+    "Forward": {"T0":0, "T1":5e-9, "Dt":5e-9},
+    "Optode": {
+        "Source": {"Type":"pencil", "Pos":[29.5,29.5,0], "Dir":[0,0,1]},
+        "Detector": [{"Pos":[29.5,29.5,59.9], "R":25}]
+    }
+}),
 
 MSTR(
 {
@@ -152,7 +400,6 @@ MSTR(
 	]
     }
 }),
-
 
 MSTR(
 {
@@ -224,7 +471,7 @@ MSTR(
         "Media": [
              {"mua": 0.00, "mus": 0.0, "g": 1.00, "n": 1.0},
              {"mua": 0.005,"mus": 1.0, "g": 0.01, "n": 1.37},
-             {"mua": 0.002,"mus": 5.0, "g": 0.90, "n": 1.0}
+             {"mua": 0.05,"mus": 5.0, "g": 0.90, "n": 1.0}
         ]
     },
     "Shapes": [
@@ -262,114 +509,6 @@ MSTR(
                 "R": 1.0
             }
 	]
-    }
-}),
-
-
-MSTR(
-{
-    "Session":{
-        "ID":"onecube",
-        "DoSaveVolume":0,
-        "DoAutoThread":1,
-        "SaveDataMask":"xv",
-        "Photons":1000000
-    },
-    "Forward":{
-        "T0":0,
-        "T1":5e-09,
-        "Dt":5e-09
-    },
-    "Optode":{
-        "Source":{
-            "Pos":[0.5,0.5,0],
-            "Dir":[0,0,1]
-        },
-        "Detector":[
-            {
-                "Pos":[0.5,0.45,0],
-                "R":0.0166666667
-            }
-        ]
-    },
-    "Domain":{
-        "OriginType":1,
-        "LengthUnit":60,
-        "Media":[
-            {
-                "mua":0,
-                "mus":0,
-                "g":1,
-                "n":1
-            },
-            {
-                "mua":0.005,
-                "mus":1,
-                "g":0,
-                "n":1.37
-            }
-        ],
-        "MediaFormat":"byte",
-        "Dim":[1,1,1]
-    },
-    "Shapes": {
-        "_ArraySize_": [1,1,1],
-        "_ArrayType_": "uint8",
-        "_ArrayData_": [1]
-    }
-}),
-
-
-MSTR(
-{
-    "Session":{
-        "ID":"twocube",
-        "DoSaveVolume":0,
-        "DoAutoThread":1,
-        "SaveDataMask":"xv",
-        "Photons":1000000
-    },
-    "Forward":{
-        "T0":0,
-        "T1":5e-09,
-        "Dt":5e-09
-    },
-    "Optode":{
-        "Source":{
-            "Pos":[1,1,0],
-            "Dir":[0,0,1]
-        },
-        "Detector":[
-            {
-                "Pos":[1,0.9,0],
-                "R":0.033333333333
-            }
-        ]
-    },
-    "Domain":{
-        "OriginType":1,
-        "LengthUnit":30,
-        "Media":[
-            {
-                "mua":0,
-                "mus":0,
-                "g":1,
-                "n":1
-            },
-            {
-                "mua":0.005,
-                "mus":1,
-                "g":0,
-                "n":1.37
-            }
-        ],
-        "MediaFormat":"byte",
-        "Dim":[2,2,2]
-    },
-    "Shapes": {
-        "_ArraySize_": [2,2,2],
-        "_ArrayType_": "uint8",
-        "_ArrayData_": [1,1,1,1,1,1,1,1]
     }
 }),
 
@@ -598,7 +737,7 @@ MSTR(
              {"mua": 0.00, "mus": 0.0, "g": 1.00, "n": 1.0},
              {"mua": 0.019, "mus": 7.8182, "g": 0.89, "n": 1.37},
              {"mua": 0.019, "mus": 7.8182, "g": 0.89, "n": 1.37},
-             {"mua": 0.0004, "mus": 0.009, "g": 0.89, "n": 1.37},
+             {"mua": 0.004, "mus": 0.009, "g": 0.89, "n": 1.37},
              {"mua": 0.02, "mus": 9.0, "g": 0.89, "n": 1.37},
              {"mua": 0.08, "mus": 40.9, "g": 0.84, "n": 1.37},
              {"mua": 0.0,"mus": 0.0, "g": 1.0, "n": 1.0}

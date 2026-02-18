@@ -6,7 +6,7 @@
 % witout boundary reflections (both external and internal) and show
 % you how to display and analyze the resulting data.
 %
-% This file is part of Monte Carlo eXtreme (MCX) URL:https://mcx.space
+% This file is part of Monte Carlo eXtreme (MCX) URL:http://mcx.sf.net
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % only clear cfg to avoid accidentally clearing other useful data
@@ -35,7 +35,7 @@ cfg.srcdir = [0 0 1];
 
 cfg.prop = [0 0 1 1            % medium 0: the environment
             0.019 7.8   0.89 1.37     % medium 1: skin & skull
-            0.0004 0.009 0.89 1.37    % medium 2: CSF
+            0.004 0.009 0.89 1.37     % medium 2: CSF
             0.02  9.0   0.89 1.37     % medium 3: gray matter
             0.08 40.9   0.84 1.37];   % medium 4: white matter
 

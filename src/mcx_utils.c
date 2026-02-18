@@ -2,7 +2,7 @@
 **  \mainpage Monte Carlo eXtreme - GPU accelerated Monte Carlo Photon Migration
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2009-2025
+**  \copyright Qianqian Fang, 2009-2024
 **
 **  \section sref Reference
 **  \li \c (\b Fang2009) Qianqian Fang and David A. Boas,
@@ -51,8 +51,6 @@
 #include "mcx_core.h"
 #include "mcx_bench.h"
 #include "mcx_mie.h"
-#include "mcx_neurojson.h"
-#include "mcx_lang.h"
 
 #if defined(_WIN32) && defined(USE_OS_TIMER) && !defined(MCX_CONTAINER)
     #include "mmc_tictoc.h"
@@ -68,7 +66,7 @@
  */
 #define FIND_JSON_KEY(id,idfull,parent,fallback,val) \
     ((tmp=cJSON_GetObjectItem(parent,id))==0 ? \
-     ((idfull==NULL || (tmp=cJSON_GetObjectItem(root,idfull))==0) ? fallback : tmp->val) \
+     ((tmp=cJSON_GetObjectItem(root,idfull))==0 ? fallback : tmp->val) \
      : tmp->val)
 
 /**
@@ -104,19 +102,20 @@
  * Short command line options
  * If a short command line option is '-' that means it only has long/verbose option.
  * Array terminates with '\0'.
- * Currently un-used options: cCJoy0-9
+ * Currently un-used options: cCJNoQy0-9
  */
 
 const char shortopt[] = {'h', 'i', 'f', 'n', 't', 'T', 's', 'a', 'g', 'b', '-', 'z', 'u', 'H', 'P',
                          'd', 'r', 'S', 'p', 'e', 'U', 'R', 'l', 'L', '-', 'I', '-', 'G', 'M', 'A', 'E', 'v', 'D',
                          'k', 'q', 'Y', 'O', 'F', '-', '-', 'x', 'X', '-', 'K', 'm', 'V', 'B', 'W', 'w', '-',
-                         'Q', '-', 'Z', 'j', '-', '-', '-', 'N', 'y', '\0'
+                         '-', '-', 'Z', 'j', '-', '-', '-', '-', '\0'
                         };
 
 /**
  * Long command line options
  * The length of this array must match the length of shortopt[], terminates with ""
  */
+
 const char* fullopt[] = {"--help", "--interactive", "--input", "--photon",
                          "--thread", "--blocksize", "--session", "--array",
                          "--gategroup", "--reflect", "--reflectin", "--srcfrom0",
@@ -129,7 +128,7 @@ const char* fullopt[] = {"--help", "--interactive", "--input", "--photon",
                          "--maxvoidstep", "--saveexit", "--saveref", "--gscatter", "--mediabyte",
                          "--momentum", "--specular", "--bc", "--workload", "--savedetflag",
                          "--internalsrc", "--bench", "--dumpjson", "--zip", "--json", "--atomic",
-                         "--srcid", "--trajstokes", "--net", "--lang", ""
+                         "--srcid", "--trajstokes", "--svmc", ""
                         };
 
 /**
@@ -142,12 +141,9 @@ const char* fullopt[] = {"--help", "--interactive", "--input", "--photon",
  * m: momentum transfer in replay
  * r: frequency domain/RF mua Jacobian by replay
  * l: total path lengths in each voxel
- * s : frequency domain/RF mus Jacobian by replay
- * t : weighted average of time-of-flight x total scattering count in each voxel
- * b : weighted average of time-of-flight x total path length in each voxel
  */
 
-const char outputtype[] = {'x', 'f', 'e', 'j', 'p', 'm', 'r', 'l', 's', 't', 'b', '\0'};
+const char outputtype[] = {'x', 'f', 'e', 'j', 'p', 'm', 'r', 'l', '\0'};
 
 /**
  * Debug flags
@@ -190,7 +186,7 @@ const char* outputformat[] = {"mc2", "nii", "hdr", "ubj", "tx3", "jnii", "bnii",
  * r: Fresnel boundary
  * a: total absorption BC
  * m: total reflection (mirror) BC
- * c: cyclic BC
+ * c: cylic BC
  */
 
 const char boundarycond[] = {'_', 'r', 'a', 'm', 'c', '\0'};
@@ -232,13 +228,6 @@ char flagset[256] = {'\0'};
 
 const char* zipformat[] = {"zlib", "gzip", "base64", "lzip", "lzma", "lz4", "lz4hc", ""};
 
-
-/**
- * JSON object to store translations for suppored languages
- */
-
-cJSON* mcx_lang = NULL;
-
 /**
  * @brief Initializing the simulation configuration with default values
  *
@@ -274,6 +263,8 @@ void mcx_initcfg(Config* cfg) {
     cfg->detpos = NULL;
     cfg->smatrix = NULL;
     cfg->vol = NULL;
+    cfg->issvmc = 0;
+    cfg->use_surfacenets = 0;   /** default to SurfaceNets */
     cfg->session[0] = '\0';
     cfg->printnum = 0;
     cfg->minenergy = 0.f;
@@ -354,7 +345,6 @@ void mcx_initcfg(Config* cfg) {
     cfg->his.totalsource = cfg->extrasrclen + 1;
     cfg->srcdata = NULL;
     memset(cfg->jsonfile, 0, MAX_PATH_LENGTH);
-    memset(cfg->langid, 0, MAX_LANG_ID);
     memset(cfg->bc, 0, 13);
     memset(&(cfg->srcparam1), 0, sizeof(float4));
     memset(&(cfg->srcparam2), 0, sizeof(float4));
@@ -370,23 +360,6 @@ void mcx_initcfg(Config* cfg) {
 #else
     cfg->parentid = mpStandalone;
 #endif
-
-    if (!mcx_lang) {
-        char* envlocale = getenv( "MCX_LANG" );
-
-        if (envlocale) {
-            int idx;
-            char langid[6] = {'\0'};
-            strncpy(langid, envlocale, 5);
-            idx = mcx_keylookup(langid, languagename);
-
-            if (idx == -1) {
-                MCX_FPRINTF(cfg->flog, "Unsupported language ID (%s), fallback to default\n", langid);
-            } else {
-                mcx_lang = mcx_parsejson(translations[idx]);
-            }
-        }
-    }
 }
 
 /**
@@ -495,11 +468,6 @@ void mcx_clearcfg(Config* cfg) {
 
     if (cfg->srcdata) {
         free(cfg->srcdata);
-    }
-
-    if (mcx_lang) {
-        cJSON_Delete(mcx_lang);
-        mcx_lang = NULL;
     }
 
     mcx_initcfg(cfg);
@@ -646,7 +614,7 @@ void mcx_savebnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name
     ubjw_write_key(root, "_DataInfo_");
     ubjw_begin_object(root, UBJ_MIXED, 0);
     UBJ_WRITE_KEY(root, "JNIFTIVersion", string, "0.5");
-    UBJ_WRITE_KEY(root, "Comment", string, "Created by MCX (https://mcx.space)");
+    UBJ_WRITE_KEY(root, "Comment", string, "Created by MCX (http://mcx.space)");
     UBJ_WRITE_KEY(root, "AnnotationFormat", string, "https://neurojson.org/jnifti/draft1");
     UBJ_WRITE_KEY(root, "SerialFormat", string, "https://neurojson.org/bjdata/draft2");
     ubjw_write_key(root, "Parser");
@@ -804,7 +772,7 @@ void mcx_savejnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name
     /* the "_DataInfo_" section */
     cJSON_AddItemToObject(root, "_DataInfo_", info = cJSON_CreateObject());
     cJSON_AddStringToObject(info, "JNIFTIVersion", "0.5");
-    cJSON_AddStringToObject(info, "Comment", "Created by MCX (https://mcx.space)");
+    cJSON_AddStringToObject(info, "Comment", "Created by MCX (http://mcx.space)");
     cJSON_AddStringToObject(info, "AnnotationFormat", "https://neurojson.org/jnifti/draft1");
     cJSON_AddStringToObject(info, "SerialFormat", "https://json.org");
     cJSON_AddItemToObject(info, "Parser", parser = cJSON_CreateObject());
@@ -926,7 +894,7 @@ void mcx_savedata(float* dat, size_t len, Config* cfg) {
     }
 
     if (cfg->outputformat == ofNifti || cfg->outputformat == ofAnalyze) {
-        mcx_savenii(dat, len * (1 + (cfg->outputtype == otRF || cfg->outputtype == otRFmus)), name, NIFTI_TYPE_FLOAT32, cfg->outputformat, cfg);
+        mcx_savenii(dat, len * (1 + (cfg->outputtype == otRF)), name, NIFTI_TYPE_FLOAT32, cfg->outputformat, cfg);
         return;
     } else if (cfg->outputformat == ofJNifti || cfg->outputformat == ofBJNifti) {
         uint dims[6] = {cfg->dim.x, cfg->dim.y, cfg->dim.z, cfg->maxgate, cfg->srcnum, 1};
@@ -940,7 +908,7 @@ void mcx_savedata(float* dat, size_t len, Config* cfg) {
             dims[5] *= cfg->detnum;
         }
 
-        if (cfg->seed == SEED_FROM_FILE && (cfg->outputtype == otRF || cfg->outputtype == otRFmus )) {
+        if (cfg->seed == SEED_FROM_FILE && cfg->outputtype == otRF) {
             dims[5] *= 2;
         }
 
@@ -965,7 +933,7 @@ void mcx_savedata(float* dat, size_t len, Config* cfg) {
         fwrite(&(cfg->dim.x), sizeof(int), 3, fp);
     }
 
-    fwrite(dat, sizeof(float), len * (1 + (cfg->outputtype == otRF || cfg->outputtype == otRFmus)), fp);
+    fwrite(dat, sizeof(float), len * (1 + (cfg->outputtype == otRF)), fp);
     fclose(fp);
 }
 
@@ -1088,12 +1056,12 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, Config* c
             col += dims[1];
         }
     } else {
-        int colnum[] = {1, cfg->his.maxmedia, cfg->his.maxmedia, cfg->his.maxmedia, 3, 3, 1, 4};
+        char colnum[] = {1, cfg->his.maxmedia, cfg->his.maxmedia, cfg->his.maxmedia, 3, 3, 1, 4};
         char* dtype[] = {"uint32", "uint32", "single", "single", "single", "single", "single", "single"};
         char* dname[] = {"detid", "nscat", "ppath", "mom", "p", "v", "w0", "s"};
         cJSON_AddItemToObject(obj, "PhotonData", dat = cJSON_CreateObject());
 
-        for (int id = 0; id < sizeof(colnum) / sizeof(int); id++) {
+        for (int id = 0; id < sizeof(colnum); id++) {
             if ((cfg->savedetflag >> id) & 0x1) {
                 uint dims[2] = {count, colnum[id]};
                 void* val = NULL;
@@ -1224,7 +1192,7 @@ void mcx_printlog(Config* cfg, char* str) {
  * @param[in] option: if set to 2, only normalize positive values (negative values for diffuse reflectance calculations)
  */
 
-void mcx_normalize(float field[], float scale, size_t fieldlen, int option, int pidx, int srcnum) {
+void mcx_normalize(float field[], float scale, int fieldlen, int option, int pidx, int srcnum) {
     int i;
 
     for (i = 0; i < fieldlen; i++) {
@@ -1320,7 +1288,7 @@ void mcx_error(const int id, const char* msg, const char* file, const int linenu
     if (id == -MCX_CUDA_ERROR_LAUNCH_FAILED) {
         MCX_FPRINTF(stdout, S_RED "MCX is terminated by your graphics driver. If you use windows, \n\
 please modify TdrDelay value in the registry. Please checkout FAQ #1 for more details:\n\
-URL: https://mcx.space/wiki/index.cgi?Doc/FAQ\n" S_RESET);
+URL: http://mcx.space/wiki/index.cgi?Doc/FAQ\n" S_RESET);
     }
 
     exit(id);
@@ -1372,40 +1340,6 @@ void mcx_assert(int ret) {
     }
 }
 
-
-/**
- * @brief Function to parse a JSON string using cJSON and print errors if detected
- *
- * @param[in] jbuf: a JSON string
- * @param[out] output: the parsed cJSON* object; if error is detected, it returns NULL
- */
-
-cJSON* mcx_parsejson(const char* jbuf) {
-    cJSON* jroot = cJSON_Parse(jbuf);
-
-    if (!jroot) {
-        char* ptrold, *ptr = (char*)cJSON_GetErrorPtr();
-
-        if (ptr) {
-            ptrold = strstr(jbuf, ptr);
-        }
-
-        if (ptr && ptrold) {
-            char* offs = (ptrold - jbuf >= 50) ? ptrold - 50 : (char*)jbuf;
-
-            while (offs < ptrold) {
-                MCX_FPRINTF(stderr, "%c", *offs);
-                offs++;
-            }
-
-            MCX_FPRINTF(stderr, "<error>%.50s\n", ptrold);
-        }
-    }
-
-    return jroot;
-}
-
-
 #ifndef MCX_CONTAINER
 
 /**
@@ -1447,14 +1381,34 @@ void mcx_readconfig(char* fname, Config* cfg) {
                 jbuf = fname;
             }
 
-            jroot = mcx_parsejson(jbuf);
+            jroot = cJSON_Parse(jbuf);
 
             if (jroot) {
                 mcx_loadjson(jroot, cfg);
                 cJSON_Delete(jroot);
             } else {
+                char* ptrold, *ptr = (char*)cJSON_GetErrorPtr();
+
+                if (ptr) {
+                    ptrold = strstr(jbuf, ptr);
+                }
+
                 if (fp != NULL) {
                     fclose(fp);
+                }
+
+                if (ptr && ptrold) {
+                    char* offs = (ptrold - jbuf >= 50) ? ptrold - 50 : jbuf;
+
+                    while (offs < ptrold) {
+                        MCX_FPRINTF(stderr, "%c", *offs);
+                        offs++;
+                    }
+
+                    MCX_FPRINTF(stderr, "<error>%.50s\n", ptrold);
+                }
+
+                if (fp != NULL) {
                     free(jbuf);
                 }
 
@@ -1473,7 +1427,7 @@ void mcx_readconfig(char* fname, Config* cfg) {
         }
 
         if (cfg->session[0] == '\0') {
-            strncpy(cfg->session, fname, MAX_SESSION_LENGTH - 1);
+            strncpy(cfg->session, fname, MAX_SESSION_LENGTH);
         }
     }
 
@@ -1539,11 +1493,6 @@ void mcx_preprocess(Config* cfg) {
     if (cfg->debuglevel & MCX_DEBUG_MOVE_ONLY) {
         cfg->issave2pt = 0;
         cfg->issavedet = 0;
-    }
-
-    if ((cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS || cfg->outputtype == otRF || cfg->outputtype == otRFmus || cfg->outputtype == otWLTOF || cfg->outputtype == otWPTOF)
-            && cfg->seed != SEED_FROM_FILE) {
-        MCX_ERROR(-6, "Jacobian output is only valid in the reply mode. Please define cfg.seed");
     }
 
     // if neither trajectory or polarization is enabled, disable istrajstokes flag
@@ -1682,6 +1631,7 @@ void mcx_preprocess(Config* cfg) {
         }
 
         if (cfg->srcid > (int)cfg->extrasrclen + 1) {
+            printf("cfg->srcid=%d\n", cfg->srcid);
             MCX_ERROR(-4, "srcid exceeds total defined source count");
         }
 
@@ -2032,7 +1982,7 @@ void mcx_loadconfig(FILE* in, Config* cfg) {
 #else
         sprintf(comment, "%s/%s", cfg->rootpath, filename);
 #endif
-        strncpy(filename, comment, MAX_FULL_PATH - 1);
+        strncpy(filename, comment, MAX_FULL_PATH);
     }
 
     comm = fgets(comment, MAX_PATH_LENGTH, in);
@@ -2270,7 +2220,7 @@ int mcx_loadjson(cJSON* root, Config* cfg) {
         val = FIND_JSON_OBJ("VolumeFile", "Domain.VolumeFile", Domain);
 
         if (val) {
-            strncpy(volfile, val->valuestring, MAX_PATH_LENGTH - 1);
+            strncpy(volfile, val->valuestring, MAX_PATH_LENGTH);
 
             if (cfg->rootpath[0]) {
 #ifdef WIN32
@@ -2279,7 +2229,7 @@ int mcx_loadjson(cJSON* root, Config* cfg) {
                 sprintf(filename, "%s/%s", cfg->rootpath, volfile);
 #endif
             } else {
-                strncpy(filename, volfile, MAX_PATH_LENGTH - 1);
+                strncpy(filename, volfile, MAX_PATH_LENGTH);
             }
         }
 
@@ -2591,9 +2541,9 @@ int mcx_loadjson(cJSON* root, Config* cfg) {
             memset(&(cfg->crop0), 0, sizeof(uint3));
             memset(&(cfg->crop1), 0, sizeof(uint3));
         } else {
-            /**
-             *  if -R is followed by a negative radius, mcx uses crop0/crop1 to set the cachebox
-             */
+            /*
+               if -R is followed by a negative radius, mcx uses crop0/crop1 to set the cachebox
+            */
             if (!cfg->issrcfrom0) {
                 cfg->crop0.x--;
                 cfg->crop0.y--;
@@ -2904,7 +2854,7 @@ int mcx_loadjson(cJSON* root, Config* cfg) {
                         MCX_ERROR(-1, "Optode.Source.Pattern JData-annotated array must be in the 'single' format");
                     }
 
-                    if (ndim == 3 && dims[2] > 1 && dims[0] > 1 && (cfg->srctype == MCX_SRC_PATTERN || cfg->srctype == MCX_SRC_PATTERN3D)) {
+                    if (ndim == 3 && dims[2] > 1 && dims[0] > 1 && cfg->srctype == MCX_SRC_PATTERN) {
                         cfg->srcnum = dims[0];
                     }
                 } else {
@@ -3038,11 +2988,11 @@ int mcx_loadjson(cJSON* root, Config* cfg) {
         }
 
         if (cfg->session[0] == '\0') {
-            strncpy(cfg->session, FIND_JSON_KEY("ID", "Session.ID", Session, "default", valuestring), MAX_SESSION_LENGTH - 1);
+            strncpy(cfg->session, FIND_JSON_KEY("ID", "Session.ID", Session, "default", valuestring), MAX_SESSION_LENGTH);
         }
 
         if (cfg->rootpath[0] == '\0') {
-            strncpy(cfg->rootpath, FIND_JSON_KEY("RootPath", "Session.RootPath", Session, "", valuestring), MAX_PATH_LENGTH - 1);
+            strncpy(cfg->rootpath, FIND_JSON_KEY("RootPath", "Session.RootPath", Session, "", valuestring), MAX_PATH_LENGTH);
         }
 
         if (!flagset['B']) {
@@ -3371,7 +3321,7 @@ void mcx_savejdata(char* filename, Config* cfg) {
 
     /* save "Shapes" constructs, prioritize over saving volume for smaller size */
     if (cfg->shapedata) {
-        cJSON* shape = mcx_parsejson(cfg->shapedata), *sp;
+        cJSON* shape = cJSON_Parse(cfg->shapedata), *sp;
 
         if (shape == NULL) {
             MCX_ERROR(-1, "the input shape construct is not a valid JSON object");
@@ -3546,8 +3496,6 @@ void mcx_loadvolume(char* filename, Config* cfg, int isbuf) {
         for (i = 0; i < datalen; i++) {
             cfg->vol[i] = val[i];
         }
-    } else if (cfg->mediabyte == 4) {
-        memcpy(cfg->vol, inputvol, (datalen << 2));
     } else if (cfg->mediabyte == MEDIA_MUA_FLOAT) {
         union {
             float f;
@@ -3576,20 +3524,19 @@ void mcx_loadvolume(char* filename, Config* cfg, int isbuf) {
         for (i = 0; i < datalen; i++) {
             f2h[0] = val[i << (1 + offset)] * cfg->unitinmm;       // mua
             f2h[1] = val[(i << (1 + offset)) + 1] * cfg->unitinmm; // mus
-            cfg->vol[i] = mcx_float2half2(f2h);
 
             if (f2h[0] != f2h[0] || f2h[1] != f2h[1]) { /*if one of mua/mus is nan in continuous medium, convert to 0-voxel*/
                 cfg->vol[i] = 0;
-
-                if (cfg->mediabyte == MEDIA_AS_F2H) {
-                    continue;
-                }
+                continue;
             }
 
             if (cfg->mediabyte == MEDIA_ASGN_F2H) {
+                cfg->vol[i] = mcx_float2half2(f2h);
                 f2h[0] = val[(i << 2) + 2];   // g
                 f2h[1] = val[(i << 2) + 3];   // n
                 cfg->vol[i + datalen] = mcx_float2half2(f2h);
+            } else {
+                cfg->vol[i] = mcx_float2half2(f2h);
             }
         }
     } else if (cfg->mediabyte == MEDIA_2LABEL_SPLIT) {
@@ -3655,32 +3602,30 @@ void mcx_replayinit(Config* cfg, float* detps, int dimdetps[2], int seedbyte) {
     cfg->nphoton = 0;
 
     for (i = 0; i < dimdetps[1]; i++) {
-        if (cfg->replaydet <= 0 || cfg->replaydet == ((int) (detps[i * dimdetps[0]]) & 0xFFFF)) {
-            if (cfg->srcid <= 0 || (((int) (detps[i * dimdetps[0]]) & 0xFFFF0000) && cfg->srcid == (((int) (detps[i * dimdetps[0]]) & 0xFFFF0000) >> 16))) {
-                if (i != cfg->nphoton) {
-                    memcpy((char*) (cfg->replay.seed) + cfg->nphoton * seedbyte,
-                           (char*) (cfg->replay.seed) + i * seedbyte,
-                           seedbyte);
-                }
-
-                cfg->replay.weight[cfg->nphoton] = 1.f;
-                cfg->replay.tof[cfg->nphoton] = 0.f;
-                cfg->replay.detid[cfg->nphoton] = (hasdetid) ? (int) (detps[i * dimdetps[0]]) : 1;
-
-                for (j = hasdetid; j < cfg->medianum - 1 + hasdetid; j++) {
-                    plen = detps[i * dimdetps[0] + offset + j];
-                    cfg->replay.weight[cfg->nphoton] *= expf(-cfg->prop[j - hasdetid + 1].mua * plen);
-                    plen *= cfg->unitinmm;
-                    cfg->replay.tof[cfg->nphoton] += plen * R_C0 * cfg->prop[j - hasdetid + 1].n;
-                }
-
-                if (cfg->replay.tof[cfg->nphoton] < cfg->tstart
-                        || cfg->replay.tof[cfg->nphoton] > cfg->tend) { /*need to consider -g*/
-                    continue;
-                }
-
-                cfg->nphoton++;
+        if (cfg->replaydet <= 0 || cfg->replaydet == (int) (detps[i * dimdetps[0]])) {
+            if (i != cfg->nphoton) {
+                memcpy((char*) (cfg->replay.seed) + cfg->nphoton * seedbyte,
+                       (char*) (cfg->replay.seed) + i * seedbyte,
+                       seedbyte);
             }
+
+            cfg->replay.weight[cfg->nphoton] = 1.f;
+            cfg->replay.tof[cfg->nphoton] = 0.f;
+            cfg->replay.detid[cfg->nphoton] = (hasdetid) ? (int) (detps[i * dimdetps[0]]) : 1;
+
+            for (j = hasdetid; j < cfg->medianum - 1 + hasdetid; j++) {
+                plen = detps[i * dimdetps[0] + offset + j];
+                cfg->replay.weight[cfg->nphoton] *= expf(-cfg->prop[j - hasdetid + 1].mua * plen);
+                plen *= cfg->unitinmm;
+                cfg->replay.tof[cfg->nphoton] += plen * R_C0 * cfg->prop[j - hasdetid + 1].n;
+            }
+
+            if (cfg->replay.tof[cfg->nphoton] < cfg->tstart
+                    || cfg->replay.tof[cfg->nphoton] > cfg->tend) { /*need to consider -g*/
+                continue;
+            }
+
+            cfg->nphoton++;
         }
     }
 
@@ -3704,13 +3649,12 @@ void mcx_replayprep(int* detid, float* ppath, History* his, Config* cfg) {
     cfg->nphoton = 0;
 
     for (i = 0; i < his->savedphoton; i++) {
-        if (cfg->replaydet <= 0 || (detid && cfg->replaydet == (detid[i] & 0xFFFF))) {
+        if (cfg->replaydet <= 0 || (detid && cfg->replaydet == detid[i])) {
             if (i != cfg->nphoton) {
                 memcpy((char*)(cfg->replay.seed) + cfg->nphoton * his->seedbyte, (char*)(cfg->replay.seed) + i * his->seedbyte, his->seedbyte);
             }
 
             cfg->replay.weight[cfg->nphoton] = 1.f;
-            cfg->replay.tof[cfg->nphoton] = 0.f;
             cfg->replay.detid[cfg->nphoton] = (detid != NULL) ? detid[i] : 1;
 
             for (j = 0; j < his->maxmedia; j++) {
@@ -3753,10 +3697,6 @@ void mcx_validatecfg(Config* cfg, float* detps, int dimdetps[2], int seedbyte) {
         partialdata + SAVE_DETID(cfg->savedetflag) + 3 * (SAVE_PEXIT(cfg->savedetflag) + SAVE_VEXIT(cfg->savedetflag))
         + SAVE_W0(cfg->savedetflag);
     hostdetreclen += cfg->polmedianum ? (4 * SAVE_IQUV(cfg->savedetflag)) : 0; // for polarized photon simulation
-
-    if (!cfg->issave2pt && cfg->issaveref) {
-        cfg->issaveref = 0;
-    }
 
     if (!cfg->issrcfrom0) {
         cfg->srcpos.x--;
@@ -3822,6 +3762,11 @@ void mcx_validatecfg(Config* cfg, float* detps, int dimdetps[2], int seedbyte) {
         cfg->seed = time(NULL);
     }
 
+    if ((cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS || cfg->outputtype == otRF)
+            && cfg->seed != SEED_FROM_FILE) {
+        MCX_ERROR(-6, "Jacobian output is only valid in the reply mode. Please define cfg.seed");
+    }
+
     for (i = 0; i < cfg->detnum; i++) {
         if (!cfg->issrcfrom0) {
             cfg->detpos[i].x--;
@@ -3845,6 +3790,24 @@ void mcx_validatecfg(Config* cfg, float* detps, int dimdetps[2], int seedbyte) {
 
         if (status) {
             MCX_ERROR(-6, mcx_last_shapeerror());
+        }
+        
+        if (cfg->issvmc) {
+            size_t vollen = cfg->dim.x * cfg->dim.y * cfg->dim.z;
+            unsigned int* newvol = (unsigned int*)malloc(vollen * 2 * sizeof(unsigned int));
+            if (!newvol) {
+                MCX_ERROR(-1, "Failed to allocate 8-byte SVMC volume");
+            }
+            // Copy the 4-byte label volume into the first half
+            memcpy(newvol, cfg->vol, vollen * sizeof(unsigned int));
+            // Zero the second half (for normal/centroid)
+            memset(newvol + vollen, 0, vollen * sizeof(unsigned int));
+
+            free(cfg->vol);           // free the old 4-byte volume
+            cfg->vol = newvol;        // now cfg->vol is 8-byte ready
+            cfg->mediabyte = MEDIA_2LABEL_SPLIT;
+
+            MCX_FPRINTF(cfg->flog, "[SVMC] Reallocated cfg->vol to 8-byte (%ux%ux%u) for --svmc\n", cfg->dim.x, cfg->dim.y, cfg->dim.z);
         }
     }
 
@@ -3889,7 +3852,7 @@ void mcx_loadseedjdat(char* filename, Config* cfg) {
     jbuf[len - 1] = '\0';
     fclose(fp);
 
-    cJSON* root = mcx_parsejson(jbuf);
+    cJSON* root = cJSON_Parse(jbuf);
     free(jbuf);
 
     if (root) {
@@ -4004,7 +3967,7 @@ void mcx_loadseedfile(Config* cfg) {
     cfg->seed = SEED_FROM_FILE;
     cfg->nphoton = his.savedphoton;
 
-    if (cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS  || cfg->outputtype == otRF || cfg->outputtype == otRFmus || cfg->outputtype == otWLTOF || cfg->outputtype == otWPTOF) { //cfg->replaydet>0
+    if (cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS  || cfg->outputtype == otRF) { //cfg->replaydet>0
         int i, j, hasdetid = 0, offset;
         float plen, *ppath;
         hasdetid = SAVE_DETID(his.savedetflag);
@@ -4033,7 +3996,6 @@ void mcx_loadseedfile(Config* cfg) {
                 }
 
                 cfg->replay.weight[cfg->nphoton] = 1.f;
-                cfg->replay.tof[cfg->nphoton] = 0.f;
                 cfg->replay.detid[cfg->nphoton] = (hasdetid) ? (int)(ppath[i * his.colcount]) : 1;
 
                 for (j = hasdetid; j < his.maxmedia + hasdetid; j++) {
@@ -4212,8 +4174,16 @@ int mcx_svmc_bgvoxel(int vol) {
  */
 
 void  mcx_maskdet(Config* cfg) {
-    uint d, dx, dy, dz, idx1d, zi, yi, c, count, isonecube;
-    float x, y, z, ix, iy, iz, rx, ry, rz, d2, mind2, d2max, radius;
+    #ifndef MCX_CONTAINER
+
+    if (cfg->isdumpmask) {
+        mcx_dumpmask(cfg);
+    }
+
+
+    #endif
+    uint d, dx, dy, dz, idx1d, zi, yi, c, count;
+    float x, y, z, ix, iy, iz, rx, ry, rz, d2, mind2, d2max;
     unsigned int* padvol;
     const float corners[8][3] = {{0.f, 0.f, 0.f}, {1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f},
         {1.f, 1.f, 0.f}, {1.f, 0.f, 1.f}, {0.f, 1.f, 1.f}, {1.f, 1.f, 1.f}
@@ -4222,8 +4192,6 @@ void  mcx_maskdet(Config* cfg) {
     dx = cfg->dim.x + 2;
     dy = cfg->dim.y + 2;
     dz = cfg->dim.z + 2;
-
-    isonecube = (cfg->dim.x == 1) && (cfg->dim.y == 1) && (cfg->dim.z == 1);
 
     /*handling boundaries in a volume search is tedious, I first pad vol by a layer of zeros,
       then I don't need to worry about boundaries any more*/
@@ -4236,27 +4204,26 @@ void  mcx_maskdet(Config* cfg) {
         }
 
     /**
-     * The goal here is to find a set of voxels for each
-     * detector so that the intersection between a sphere
-     * of R=cfg->detradius,c0=cfg->detpos[d] and the object
-     * surface (or bounding box) is fully covered.
-     */
+       The goal here is to find a set of voxels for each
+    detector so that the intersection between a sphere
+    of R=cfg->detradius,c0=cfg->detpos[d] and the object
+    surface (or bounding box) is fully covered.
+        */
     for (d = 0; d < cfg->detnum; d++) {                     /*loop over each detector*/
         count = 0;
-        radius = ABS(cfg->detpos[d].w);
-        d2max = (radius + 1.7321f) * (radius + 1.7321f);
+        d2max = (cfg->detpos[d].w + 1.7321f) * (cfg->detpos[d].w + 1.7321f);
 
-        for (z = -radius - 1.f; z <= radius + 1.f; z += 0.5f) { /*search in a cube with edge length 2*R+3*/
+        for (z = -cfg->detpos[d].w - 1.f; z <= cfg->detpos[d].w + 1.f; z += 0.5f) { /*search in a cube with edge length 2*R+3*/
             iz = z + cfg->detpos[d].z;
 
-            for (y = -radius - 1.f; y <= radius + 1.f; y += 0.5f) {
+            for (y = -cfg->detpos[d].w - 1.f; y <= cfg->detpos[d].w + 1.f; y += 0.5f) {
                 iy = y + cfg->detpos[d].y;
 
-                for (x = -radius - 1.f; x <= radius + 1.f; x += 0.5f) {
+                for (x = -cfg->detpos[d].w - 1.f; x <= cfg->detpos[d].w + 1.f; x += 0.5f) {
                     ix = x + cfg->detpos[d].x;
 
                     if (iz < 0 || ix < 0 || iy < 0 || ix >= cfg->dim.x || iy >= cfg->dim.y || iz >= cfg->dim.z ||
-                            x * x + y * y + z * z > (radius + 1.f) * (radius + 1.f)) {
+                            x * x + y * y + z * z > (cfg->detpos[d].w + 1.f) * (cfg->detpos[d].w + 1.f)) {
                         continue;
                     }
 
@@ -4278,7 +4245,7 @@ void  mcx_maskdet(Config* cfg) {
                         }
                     }
 
-                    if (mind2 == VERY_BIG || mind2 >= (radius + 0.5f * (1.f + isonecube)) * (radius + 0.5f * (1.f + isonecube))) {
+                    if (mind2 == VERY_BIG || mind2 >= (cfg->detpos[d].w + 0.5f) * (cfg->detpos[d].w + 0.5f)) {
                         continue;
                     }
 
@@ -4330,13 +4297,7 @@ void  mcx_maskdet(Config* cfg) {
 
     free(padvol);
 
-#ifndef MCX_CONTAINER
 
-    if (cfg->isdumpmask) {
-        mcx_dumpmask(cfg);
-    }
-
-#endif
 }
 
 /**
@@ -4383,7 +4344,6 @@ void mcx_dumpmask(Config* cfg) {
 
     if (cfg->isdumpmask == 1 && cfg->isdumpjson == 0) { /*if dumpmask>1, simulation will also run*/
         MCX_FPRINTF(cfg->flog, "volume mask is saved in %s\n", fname);
-        mcx_clearcfg(cfg);
         exit(0);
     }
 }
@@ -4548,7 +4508,7 @@ int  mcx_jdataencode(void* vol, int ndim, uint* dims, char* type, int byte, int 
     totalbytes = datalen * byte;
 
     if (!cfg->isdumpjson) {
-        MCX_FPRINTF(cfg->flog, "%s [%s] ...", T_("compressing data"), zipformat[zipid]);
+        MCX_FPRINTF(cfg->flog, "compressing data [%s] ...", zipformat[zipid]);
     }
 
     /*compress data using zlib*/
@@ -4561,7 +4521,7 @@ int  mcx_jdataencode(void* vol, int ndim, uint* dims, char* type, int byte, int 
 
     if (!ret) {
         if (!cfg->isdumpjson) {
-            MCX_FPRINTF(cfg->flog, "%s: %.1f%%\t", T_("compression ratio"), compressedbytes * 100.f / totalbytes);
+            MCX_FPRINTF(cfg->flog, "compression ratio: %.1f%%\t", compressedbytes * 100.f / totalbytes);
         }
 
         if (isubj) {
@@ -4584,7 +4544,7 @@ int  mcx_jdataencode(void* vol, int ndim, uint* dims, char* type, int byte, int 
             ret = zmat_encode(compressedbytes, compressed, &totalbytes, (uchar**)&buf, zmBase64, &status);
 
             if (!cfg->isdumpjson) {
-                MCX_FPRINTF(cfg->flog, "%s: %.1f%%\n", T_("after encoding"), totalbytes * 100.f / (datalen * byte));
+                MCX_FPRINTF(cfg->flog, "after encoding: %.1f%%\n", totalbytes * 100.f / (datalen * byte));
             }
 
             if (!ret) {
@@ -4779,8 +4739,8 @@ int mcx_remap(char* opt) {
  */
 
 void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
-    int i = 1, isinteractive = 1, len;
-    char filename[MAX_PATH_LENGTH] = {0}, *jsoninput = NULL, issavelog = -1;
+    int i = 1, isinteractive = 1, issavelog = 0, len;
+    char filename[MAX_PATH_LENGTH] = {0}, *jsoninput = NULL;
     char logfile[MAX_PATH_LENGTH] = {0};
     float np = 0.f;
 
@@ -4797,12 +4757,12 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
         if (argv[i][0] == '-') {
             if (argv[i][1] == '-') {
                 if (mcx_remap(argv[i])) {
-                    MCX_FPRINTF(cfg->flog, "%s: %s", T_("Command option"), argv[i]);
-                    MCX_ERROR(-2, T_("unknown verbose option"));
+                    MCX_FPRINTF(cfg->flog, "Command option: %s", argv[i]);
+                    MCX_ERROR(-2, "unknown verbose option");
                 }
             } else if (strlen(argv[i]) > 2) {
-                MCX_FPRINTF(cfg->flog, "%s: %s", T_("Command option"), argv[i]);
-                MCX_ERROR(-2, T_("unknown short option"));
+                MCX_FPRINTF(cfg->flog, "Command option: %s", argv[i]);
+                MCX_ERROR(-2, "unknown short option");
             }
 
             if (argv[i][1] <= 'z' && argv[i][1] >= 'A') {
@@ -4816,7 +4776,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
 
                 case 'i':
                     if (filename[0]) {
-                        MCX_ERROR(-2, T_("you can not specify both interactive mode and config file"));
+                        MCX_ERROR(-2, "you can not specify both interactive mode and config file");
                     }
 
                     isinteractive = 1;
@@ -4828,10 +4788,6 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                     if (i < argc - 1 && argv[i + 1][0] == '{') {
                         jsoninput = argv[i + 1];
                         i++;
-                    } else if (i == argc - 1 || argv[i + 1][0] == '-') {
-                        runcommand("", "", &jsoninput);
-                        isinteractive = 2;
-                        i += (i < argc - 1);
                     } else {
                         i = mcx_readarg(argc, argv, i, filename, "string");
                     }
@@ -4922,7 +4878,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                     break;
 
                 case 'l':
-                    i = mcx_readarg(argc, argv, i, &issavelog, "char");
+                    issavelog = 1;
                     break;
 
                 case 'L':
@@ -4944,7 +4900,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                         if (cfg->gpuid > 0 && cfg->gpuid < MAX_DEVICE) {
                             cfg->deviceid[cfg->gpuid - 1] = '1';
                         } else {
-                            MCX_ERROR(-2, T_("GPU ID can not be more than 256"));
+                            MCX_ERROR(-2, "GPU id can not be more than 256");
                         }
 
                         break;
@@ -4981,7 +4937,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                         cfg->shapedata = (char*)malloc(len);
                         memcpy(cfg->shapedata, argv[++i], len);
                     } else {
-                        MCX_ERROR(-1, T_("json shape constructs are expected after -P"));
+                        MCX_ERROR(-1, "json shape constructs are expected after -P");
                     }
 
                     break;
@@ -4997,7 +4953,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                         cfg->extrajson = (char*)calloc(1, len + 1);
                         memcpy(cfg->extrajson, argv[++i], len);
                     } else {
-                        MCX_ERROR(-1, T_("json fragment is expected after --json"));
+                        MCX_ERROR(-1, "json fragment is expected after --json");
                     }
 
                     break;
@@ -5009,7 +4965,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                 case 'E':
                     if (i < argc - 1 && (strstr(argv[i + 1], ".mch") != NULL || strstr(argv[i + 1], ".jdat") != NULL) ) { /*give an mch file to initialize the seed*/
 #if defined(USE_LL5_RAND)
-                        MCX_ERROR(-1, T_("seeding file is not supported in this binary"));
+                        MCX_ERROR(-1, "seeding file is not supported in this binary");
 #else
                         i = mcx_readarg(argc, argv, i, cfg->seedfile, "string");
                         cfg->seed = SEED_FROM_FILE;
@@ -5024,7 +4980,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                     i = mcx_readarg(argc, argv, i, &(cfg->outputtype), "string");
 
                     if (mcx_lookupindex(&(cfg->outputtype), outputtype)) {
-                        MCX_ERROR(-2, T_("the specified output data type is not recognized"));
+                        MCX_ERROR(-2, "the specified output data type is not recognized");
                     }
 
                     break;
@@ -5055,7 +5011,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                         cfg->mediabyte = mcx_keylookup(argv[++i], mediaformat);
 
                         if (cfg->mediabyte == -1) {
-                            MCX_ERROR(-1, T_("Unsupported media format"));
+                            MCX_ERROR(-1, "Unsupported media format.");
                         }
 
                         cfg->mediabyte = mediaformatid[cfg->mediabyte];
@@ -5067,11 +5023,11 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
 
                 case 'F':
                     if (i >= argc) {
-                        MCX_ERROR(-1, T_("incomplete input"));
+                        MCX_ERROR(-1, "incomplete input");
                     }
 
                     if ((cfg->outputformat = mcx_keylookup(argv[++i], outputformat)) < 0) {
-                        MCX_ERROR(-2, T_("the specified output data type is not recognized"));
+                        MCX_ERROR(-2, "the specified output data type is not recognized");
                     }
 
                     break;
@@ -5112,111 +5068,6 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
 
                     break;
 
-                case 'y':
-                    if (i + 1 < argc && isalpha((int)argv[i + 1][0]) ) {
-                        int idx = mcx_keystartwith(argv[++i], languagename);
-
-                        if (idx == -1) {
-                            MCX_FPRINTF(cfg->flog, "Unsupported language ID (%s), fallback to default\n", argv[i]);
-                        } else {
-                            mcx_lang = mcx_parsejson(translations[idx]);
-                        }
-
-                    } else {
-                        MCX_FPRINTF(cfg->flog, "%s: \n", T_("Built-in languages"));
-
-                        for (int i = 0; i < sizeof(benchname) / sizeof(char*) - 1; i++) {
-                            cJSON* tmp = NULL, *root = NULL;
-                            mcx_lang = mcx_parsejson(translations[i]);
-                            MCX_FPRINTF(cfg->flog, "\t%s\t%s\n", languagename[i], FIND_JSON_KEY("_LANG_", NULL, mcx_lang, "(Invalid JSON, see error above)", valuestring));
-                            cJSON_Delete(mcx_lang);
-                        }
-
-                        exit(0);
-                    }
-
-                    break;
-
-                case 'Q':
-                    if (i + 1 < argc && isalpha((int)argv[i + 1][0]) ) {
-                        int idx = mcx_keylookup(argv[++i], benchname);
-
-                        if (idx == -1) {
-                            MCX_ERROR(-1, T_("Unsupported bechmark."));
-                        }
-
-                        isinteractive = 0;
-                        jsoninput = (char*)benchjson[idx];
-                    } else {
-                        MCX_FPRINTF(cfg->flog, "%s: \n", T_("Built-in benchmarks"));
-
-                        for (int i = 0; i < sizeof(benchname) / sizeof(char*) - 1; i++) {
-                            MCX_FPRINTF(cfg->flog, "\t%s\n", benchname[i]);
-                        }
-
-                        exit(0);
-                    }
-
-                    break;
-
-                case 'N':
-                    if (i == argc - 1 || argv[i + 1][0] == '-' || argv[i + 1][0] == '{' || strchr(argv[i + 1], '=')) {
-                        int j, doclen;
-                        char* jbuf = NULL;
-
-                        if (i < argc - 1 && argv[i + 1][0] == '{') {
-                            char cmd[MAX_PATH_LENGTH] = "curl -s -X POST -H 'Content-Type: application/json' -d ";
-                            sprintf(cmd + strlen(cmd), "'%s' \"https://neurojson.io:7777/mcx/_find\"", argv[i + 1]);
-                            runcommand(cmd, "", &jbuf);
-                        } else if (i < argc - 1 && strchr(argv[i + 1], '=')) {
-                            char cmd[MAX_PATH_LENGTH] = "curl -s -X GET 'https://neurojson.io:7777/mcx/_all_docs?";
-                            sprintf(cmd + strlen(cmd), "%s'", argv[i + 1]);
-                            runcommand(cmd, "", &jbuf);
-                        } else {
-                            runcommand("curl -s -X POST -H 'Content-Type: application/json' -d '{\"selector\": {\"Session\": {\"$gt\": null}},\"fields\": [\"_id\"],\"limit\":50}' \"https://neurojson.io:7777/mcx/_find\"", "", &jbuf);
-                        }
-
-                        cJSON* root = mcx_parsejson(jbuf), *docs = cJSON_GetObjectItem(root, "docs"), *subitem, *tmp;
-
-                        if (!docs) {
-                            docs = cJSON_GetObjectItem(root, "rows");
-
-                            if (!docs || !root) {
-                                MCX_ERROR(-1, jbuf);
-                            }
-                        }
-
-                        doclen = cJSON_GetArraySize(docs);
-                        subitem = docs->child;
-                        MCX_FPRINTF(cfg->flog, "%s (%d)\n", T_("Downloading simulations from NeuroJSON.io (https://neurojson.org/db/mcx)"), doclen - 1);
-
-                        for (j = 0; j < doclen; j++) {
-                            char* docid = (cJSON_GetObjectItem(subitem, "_id") ? FIND_JSON_KEY("_id", "id", subitem, "", valuestring) : FIND_JSON_KEY("id", "id", subitem, "", valuestring));
-
-                            if (docid && docid[0] != '_' && docid[0] != '.') {
-                                printf("\t%s\n", docid);
-                            }
-
-                            subitem = subitem->next;
-                        }
-
-                        cJSON_Delete(root);
-                        free(jbuf);
-                        exit(0);
-                    } else {
-                        if (strstr(argv[i + 1], "http") == argv[i + 1]) {
-                            runcommand("curl -s -X GET ", argv[i + 1], &jsoninput);
-                        } else if (strchr(argv[i + 1], '/')) {
-                            runcommand("curl -s -X GET https://neurojson.io:7777/", argv[i + 1], &jsoninput);
-                        } else {
-                            runcommand("curl -s -X GET https://neurojson.io:7777/mcx/", argv[i + 1], &jsoninput);
-                        }
-
-                        isinteractive = 2;
-                    }
-
-                    break;
-
                 case '-':  /*additional verbose parameters*/
                     if (strcmp(argv[i] + 2, "maxvoidstep") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->maxvoidstep), "int");
@@ -5241,6 +5092,29 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                         } else {
                             i = mcx_readarg(argc, argv, i, &(cfg->isdumpjson), "int");
                         }
+                    } else if (strcmp(argv[i] + 2, "bench") == 0) {
+                        if (i + 1 < argc && isalpha(argv[i + 1][0]) ) {
+                            int idx = mcx_keylookup(argv[++i], benchname);
+
+                            if (idx == -1) {
+                                MCX_ERROR(-1, "Unsupported bechmark.");
+                            }
+
+                            isinteractive = 0;
+                            jsoninput = (char*)benchjson[idx];
+                        } else {
+                            MCX_FPRINTF(cfg->flog, "Built-in benchmarks:\n");
+
+                            for (int i = 0; i < MAX_MCX_BENCH - 1; i++) {
+                                if (benchname[i][0] == '\0') {
+                                    break;
+                                }
+
+                                MCX_FPRINTF(cfg->flog, "\t%s\n", benchname[i]);
+                            }
+
+                            exit(0);
+                        }
                     } else if (strcmp(argv[i] + 2, "reflectin") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->isrefint), "char");
                     } else if (strcmp(argv[i] + 2, "atomic") == 0) {
@@ -5253,15 +5127,20 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
                         i = mcx_readarg(argc, argv, i, &(cfg->istrajstokes), "int");
                     } else if (strcmp(argv[i] + 2, "internalsrc") == 0) {
                         i = mcx_readarg(argc, argv, i, &(cfg->internalsrc), "int");
+                    } else if (strcmp(argv[i] + 2, "svmc") == 0) {
+                        int mode = 0;
+                        i = mcx_readarg(argc, argv, i, &mode, "int");
+                        cfg->issvmc = (mode > 0);
+                        cfg->use_surfacenets = (mode == 2);
                     } else {
-                        MCX_FPRINTF(cfg->flog, "%s: --%s\n", T_("unknown verbose option"), argv[i] + 2);
+                        MCX_FPRINTF(cfg->flog, "unknown verbose option: --%s\n", argv[i] + 2);
                     }
 
                     break;
 
                 default:
-                    MCX_FPRINTF(cfg->flog, "%s: %s", T_("Command option"), argv[i]);
-                    MCX_ERROR(-2, T_("unknown short option"));
+                    MCX_FPRINTF(cfg->flog, "Command option: %s", argv[i]);
+                    MCX_ERROR(-2, "unknown short option");
                     break;
             }
         }
@@ -5269,29 +5148,22 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
         i++;
     }
 
-    if (issavelog == 0) {
-        cfg->printnum = -1;
-    }
-
-    if (issavelog > 0) {
-        sprintf(logfile, "%s.log", (strlen(cfg->session) ? cfg->session : T_("unnamed")));
+    if (issavelog && cfg->session[0]) {
+        sprintf(logfile, "%s.log", cfg->session);
         cfg->flog = fopen(logfile, "wt");
 
         if (cfg->flog == NULL) {
             cfg->flog = stdout;
-            MCX_FPRINTF(cfg->flog, "%s\n", T_("unable to save to log file, will print from stdout"));
+            MCX_FPRINTF(cfg->flog, "unable to save to log file, will print from stdout\n");
         }
     }
 
-    if ((cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS  || cfg->outputtype == otRF || cfg->outputtype == otRFmus || cfg->outputtype == otWLTOF || cfg->outputtype == otWPTOF) && cfg->seed != SEED_FROM_FILE) {
-        MCX_ERROR(-1, T_("Jacobian output is only valid in the reply mode. Please give an mch file after '-E'."));
+    if ((cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS  || cfg->outputtype == otRF) && cfg->seed != SEED_FROM_FILE) {
+        MCX_ERROR(-1, "Jacobian output is only valid in the reply mode. Please give an mch file after '-E'.");
     }
 
     if (cfg->isgpuinfo != 2) { /*print gpu info only*/
-        if (isinteractive == 2 && jsoninput) {
-            mcx_readconfig(jsoninput, cfg);
-            free(jsoninput);
-        } else if (isinteractive) {
+        if (isinteractive) {
             mcx_readconfig((char*)"", cfg);
         } else if (jsoninput) {
             mcx_readconfig(jsoninput, cfg);
@@ -5300,14 +5172,14 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
         }
 
         if (cfg->extrajson) {
-            cJSON* jroot = mcx_parsejson(cfg->extrajson);
+            cJSON* jroot = cJSON_Parse(cfg->extrajson);
 
             if (jroot) {
                 cfg->extrajson[0] = '_';
                 mcx_loadjson(jroot, cfg);
                 cJSON_Delete(jroot);
             } else {
-                MCX_ERROR(-1, T_("invalid json fragment following --json"));
+                MCX_ERROR(-1, "invalid json fragment following --json");
             }
         }
     }
@@ -5381,43 +5253,6 @@ int mcx_keylookup(char* origkey, const char* table[]) {
 }
 
 /**
- * @brief Look up a string in a string list and return the index
- *
- * @param[in] origkey: string to be looked up
- * @param[out] table: the dictionary where the string is searched
- * @return if found, return the index of the string in the dictionary, otherwise -1.
- */
-
-int mcx_keystartwith(char* origkey, const char* table[]) {
-    int i = 0;
-    char* key = malloc(strlen(origkey) + 1);
-    memcpy(key, origkey, strlen(origkey) + 1);
-
-    if (strlen(origkey) > 2 && key[2] == '-') {
-        key[2] = '_';
-    }
-
-    while (key[i]) {
-        key[i] = tolower(key[i]);
-        i++;
-    }
-
-    i = 0;
-
-    while (table[i] && table[i][0] != '\0') {
-        if (strstr(table[i], key)) {
-            free(key);
-            return i;
-        }
-
-        i++;
-    }
-
-    free(key);
-    return -1;
-}
-
-/**
  * @brief Look up a single character in a string
  *
  * @param[in] key: character to be looked up
@@ -5450,7 +5285,7 @@ void mcx_version(Config* cfg) {
     const char ver[] = "$Rev::      $ " MCX_VERSION;
     uint v = 0;
     sscanf(ver, "$Rev::%x", &v);
-    MCX_FPRINTF(cfg->flog, "%s:\t%x\nVersion:\t%s\nMajor:\t\t%d\nMinor:\t\t%d\n", T_("MCX Revision"), v, MCX_VERSION, MCX_VERSION_MAJOR, MCX_VERSION_MINOR);
+    MCX_FPRINTF(cfg->flog, "MCX Revision %x\n", v);
     exit(0);
 }
 
@@ -5546,27 +5381,6 @@ int mcx_float2half2(float input[2]) {
     return f2h.i[0];
 }
 
-/**
- * @brief Lookup and return translations for specified language
- *
- * @param[in] cfg: simulation configuration
- */
-
-char* T_(const char* key) {
-    cJSON* tmp = NULL, *root = NULL;
-
-    if (mcx_lang) {
-        if (cJSON_IsObject(mcx_lang->child)) {
-            mcx_lang = mcx_lang->child;
-        }
-
-        return (char*)FIND_JSON_KEY(key, NULL, mcx_lang, key, valuestring);
-    }
-
-    return (char*)key;
-}
-
-
 #ifndef MCX_CONTAINER
 
 /**
@@ -5584,7 +5398,7 @@ int mcx_run_from_json(char* jsonstr) {
     mcx_readconfig(jsonstr, &mcxconfig);
 
     if (!(activedev = mcx_list_gpu(&mcxconfig, &gpuinfo))) {
-        MCX_ERROR(-1, T_("No GPU device found"));
+        MCX_ERROR(-1, "No GPU device found\n");
     }
 
 #ifdef _OPENMP
@@ -5611,15 +5425,11 @@ int mcx_run_from_json(char* jsonstr) {
  */
 
 void mcx_printheader(Config* cfg) {
-    if (cfg->printnum >= 0 ) {
-        if (strcmp(T_("_MCX_BANNER_"), "_MCX_BANNER_")) {
-            MCX_FPRINTF(cfg->flog, "%s", T_("_MCX_BANNER_"));
-        } else {
-            MCX_FPRINTF(cfg->flog, S_MAGENTA"\
+    MCX_FPRINTF(cfg->flog, S_MAGENTA"\
 ###############################################################################\n\
 #                      Monte Carlo eXtreme (MCX) -- CUDA                      #\n\
-#          Copyright (c) 2009-2025 Qianqian Fang <q.fang at neu.edu>          #\n\
-#" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
+#          Copyright (c) 2009-2024 Qianqian Fang <q.fang at neu.edu>          #\n\
+#" S_BLUE "                https://mcx.space/  &  https://neurojson.io/                 " S_MAGENTA "#\n\
 #                                                                             #\n\
 # Computational Optics & Translational Imaging (COTI) Lab- " S_BLUE "http://fanglab.org " S_MAGENTA "#\n\
 #   Department of Bioengineering, Northeastern University, Boston, MA, USA    #\n\
@@ -5629,15 +5439,11 @@ void mcx_printheader(Config* cfg) {
 #  Open-source codes and reusable scientific data are essential for research, #\n\
 # MCX proudly developed human-readable JSON-based data formats for easy reuse.#\n\
 #                                                                             #\n\
-#Please visit our free scientific data sharing portal at " S_BLUE "https://neurojson.io " S_MAGENTA "#\n\
-# and consider sharing your public datasets in standardized JSON/JData format #\n" S_RESET);
-        }
-
-        MCX_FPRINTF(cfg->flog, S_MAGENTA"\
+#Please visit our free scientific data sharing portal at " S_BLUE "https://neurojson.io/" S_MAGENTA "#\n\
+# and consider sharing your public datasets in standardized JSON/JData format #\n\
 ###############################################################################\n\
-$Rev::      $" S_GREEN MCX_VERSION S_MAGENTA  "$Date::                       $ by $Author::             $\n\
+$Rev::      $" S_GREEN MCX_VERSION S_MAGENTA " $Date::                       $ by $Author::             $\n\
 ###############################################################################\n" S_RESET);
-    }
 }
 
 /**
@@ -5654,16 +5460,12 @@ usage: %s <param1> <param2> ...\n\
 where possible parameters include (the first value in [*|*] is the default)\n\
 \n"S_BOLD S_CYAN"\
 == Required option ==\n" S_RESET"\
- -f config     (--input)       read an input file in the .json format,if config\n\
-                               string starts with '{',it is parsed as an inline\n\
-                               JSON input file; if -f is followed by nothing or\n\
-                               a single '-', it reads input from stdin via pipe\n\
+ -f config     (--input)       read an input file in .json or .inp format\n\
+                               if the string starts with '{', it is parsed as\n\
+                               an inline JSON input file\n\
       or\n\
- -Q/--bench [cube60, skinvessel,...] run a buint-in benchmark specified by name\n\
-                               run -Q without parameter to get a list\n\
- -N benchmark  (--net)         get benchmark from NeuroJSON.io, -N only to list\n\
-                               benchmark can be dataset URL,or dbname/benchname\n\
-                               requires 'curl', install from https://curl.se/\n\
+ --bench ['cube60','skinvessel',..] run a buint-in benchmark specified by name\n\
+                               run --bench without parameter to get a list\n\
 \n"S_BOLD S_CYAN"\
 == MC options ==\n" S_RESET"\
  -n [0|int]    (--photon)      total photon number (exponential form accepted)\n\
@@ -5690,7 +5492,7 @@ where possible parameters include (the first value in [*|*] is the default)\n\
                                eg: --bc ______010 saves photons exiting at y=0\n\
  -u [1.|float] (--unitinmm)    defines the length unit for the grid edge\n\
  -U [1|0]      (--normalize)   1 to normalize flux to unitary; 0 save raw\n\
- -E [1648335518|int|mch](--seed) set rand-number-generator seed, -1 to generate\n\
+ -E [0|int|mch](--seed)        set random-number-generator seed, -1 to generate\n\
                                if an mch file is followed, MCX \"replays\" \n\
                                the detected photon; the replay mode can be used\n\
                                to calculate the mua/mus Jacobian matrices\n\
@@ -5746,9 +5548,9 @@ where possible parameters include (the first value in [*|*] is the default)\n\
                                 {[f:mua]}; mus/g/n from medium type 1\n\
                              102 or muamus_half: 2x 16bit float for mua/mus\n\
                                 {[h:mua][h:mus]}; g/n from medium type 1\n\
-                             103 or asgn_byte: 4-byte gray-levels for mua/s/g/n\n\
+                             103 or asgn_byte: 4x byte gray-levels for mua/s/g/n\n\
                                 {[mua][mus][g][n]}; 0-255 mixing prop types 1&2\n\
-                             104 or muamus_short: 2-short gray-levels for mua/s\n\
+                             104 or muamus_short: 2x short gray-levels for mua/s\n\
                                 {[s:mua][s:mus]}; 0-65535 mixing prop types 1&2\n\
        when formats 99 or 102 is used, the mua/mus values in the input volume\n\
        binary data must be pre-scaled by voxel size (unitinmm) if it is not 1.\n\
@@ -5757,12 +5559,11 @@ where possible parameters include (the first value in [*|*] is the default)\n\
 \n"S_BOLD S_CYAN"\
 == Output options ==\n" S_RESET"\
  -s sessionid  (--session)     a string to label all output file names\n\
- -O [X|XFEJPMRLSTB](--outputtype) X - output flux, F - fluence, E - energy\n\
+ -O [X|XFEJPMRL](--outputtype) X - output flux, F - fluence, E - energy deposit\n\
     /case insensitive/         J - Jacobian (replay mode),   P - scattering, \n\
                                event counts at each voxel (replay mode only)\n\
                                M - momentum transfer; R - RF/FD Jacobian\n\
-                               L - total pathlength; S - RF/FD mus Jacobian\n\
-                               T - time-of-flight*nscat;B - time-of-flight*path\n\
+                               L - total pathlength\n\
  -d [1|0-3]    (--savedet)     1 to save photon info at detectors; 0 not save\n\
                                2 reserved, 3 terminate simulation when detected\n\
                                photon buffer is filled\n\
@@ -5774,7 +5575,7 @@ where possible parameters include (the first value in [*|*] is the default)\n\
                               16 X  output exit position (3)\n\
                               32 V  output exit direction (3)\n\
                               64 W  output initial weight (1)\n\
-      combine multiple items by using a string,or add selected numbers together\n\
+      combine multiple items by using a string, or add selected numbers together\n\
       by default, mcx only saves detector ID and partial-path data\n\
  -x [0|1]      (--saveexit)    1 to save photon exit positions and directions\n\
                                setting -x to 1 also implies setting '-d' to 1.\n\
@@ -5782,7 +5583,7 @@ where possible parameters include (the first value in [*|*] is the default)\n\
  -X [0|1]      (--saveref)     1 to save diffuse reflectance at the air-voxels\n\
                                right outside of the domain; if non-zero voxels\n\
                                appear at the boundary, pad 0s before using -X\n\
- -m [0|1]      (--momentum)    1 to save photon momentum transfer,0 not to save\n\
+ -m [0|1]      (--momentum)    1 to save photon momentum transfer,0 not to save.\n\
                                same as adding 'M' to the -w flag\n\
  -q [0|1]      (--saveseed)    1 to save photon RNG seed for replay; 0 not save\n\
  -M [0|1]      (--dumpmask)    1 to dump detector volume masks; 0 do not save\n\
@@ -5809,8 +5610,8 @@ where possible parameters include (the first value in [*|*] is the default)\n\
                                3 lzip: lzip format (high compression,very slow)\n\
                                4 lzma: lzma format (high compression,very slow)\n\
                                5 lz4: LZ4 format (low compression,extrem. fast)\n\
-                               6 lz4hc: LZ4HC format(moderate compression,fast)\n\
- --dumpjson [-,0,1,'file.json'] export all settings,including volume data using\n\
+                               6 lz4hc: LZ4HC format (moderate compression,fast)\n\
+ --dumpjson [-,0,1,'file.json']  export all settings, including volume data using\n\
                                JSON/JData (https://neurojson.org) format for\n\
                                easy sharing; can be reused using -f\n\
                                if followed by nothing or '-', mcx will print\n\
@@ -5821,7 +5622,6 @@ where possible parameters include (the first value in [*|*] is the default)\n\
 \n"S_BOLD S_CYAN"\
 == User IO options ==\n" S_RESET"\
  -h            (--help)        print this message\n\
- -y [zh_CN,..] (--lang)        select language, followed by nothing to print\n\
  -v            (--version)     print MCX revision number\n\
  -l            (--log)         print messages to a log file instead\n\
  -i            (--interactive) interactive mode\n\
@@ -5829,22 +5629,22 @@ where possible parameters include (the first value in [*|*] is the default)\n\
 == Debug options ==\n" S_RESET"\
  -D [0|int]    (--debug)       print debug information (you can use an integer\n\
   or                           or a string by combining the following flags)\n\
- -D [''|RMPT]                  1 R debug RNG\n\
-    /case insensitive/         2 M store photon trajectory info\n\
-                               4 P print progress bar\n\
-                               8 T save trajectory data only, disable flux/detp\n\
-      combine multiple items by using a string,or add selected numbers together\n\
+ -D [''|RMPT]                  1 R  debug RNG\n\
+    /case insensitive/         2 M  store photon trajectory info\n\
+                               4 P  print progress bar\n\
+                               8 T  save trajectory data only, disable flux/detp\n\
+      combine multiple items by using a string, or add selected numbers together\n\
 \n"S_BOLD S_CYAN"\
 == Additional options ==\n" S_RESET"\
  --root         [''|string]    full path to the folder storing the input files\n\
  --gscatter     [1e9|int]      after a photon completes the specified number of\n\
                                scattering events, mcx then ignores anisotropy g\n\
                                and only performs isotropic scattering for speed\n\
- --srcid  [0|-1,0,1,2,..]     -1 simulate multi-source separately;0 all sources\n\
-                               together;a positive integer runs a single source\n\
+ --srcid  [0|-1,0,1,2,..]      -1 simulate multi-source separately;0 all sources\n\
+                               together; a positive integer runs a single source\n\
  --internalsrc  [0|1]          set to 1 to skip entry search to speedup launch\n\
  --trajstokes   [0|1]          set to 1 to save Stokes IQUV in trajectory data\n\
- --maxvoidstep  [1000|int]     max distance (in voxel unit) of a photon that\n\
+ --maxvoidstep  [1000|int]     maximum distance (in voxel unit) of a photon that\n\
                                can travel before entering the domain, if \n\
                                launched outside (i.e. a widefield source)\n\
  --maxjumpdebug [10000000|int] when trajectory is requested (i.e. -D M),\n\
@@ -5852,27 +5652,17 @@ where possible parameters include (the first value in [*|*] is the default)\n\
                                stored (default: 1e7)\n\
 \n"S_BOLD S_CYAN"\
 == Example ==\n" S_RESET"\
-example: (list built-in benchmarks: -Q/--bench)\n"S_MAGENTA"\
-       %s -Q\n" S_RESET"\
-or (list supported GPUs on the system: -L/--listgpu)\n"S_MAGENTA"\
+example: (list built-in benchmarks)\n"S_MAGENTA"\
+       %s --bench\n" S_RESET"\
+or (list supported GPUs on the system)\n"S_MAGENTA"\
        %s -L\n" S_RESET"\
 or (use multiple devices - 1st,2nd and 4th GPUs - together with equal load)\n"S_MAGENTA"\
-       %s -Q cube60b -n 1e7 -G 1101 -W 10,10,10\n" S_RESET"\
+       %s --bench cube60b -n 1e7 -G 1101 -W 10,10,10\n" S_RESET"\
 or (use inline domain definition)\n"S_MAGENTA"\
        %s -f input.json -P '{\"Shapes\":[{\"ZLayers\":[[1,10,1],[11,30,2],[31,60,3]]}]}'\n" S_RESET"\
 or (use inline json setting modifier)\n"S_MAGENTA"\
        %s -f input.json -j '{\"Optode\":{\"Source\":{\"Type\":\"isotropic\"}}}'\n" S_RESET"\
 or (dump simulation in a single json file)\n"S_MAGENTA"\
-       %s -Q cube60planar --dumpjson\n" S_RESET"\
-or (use -N/--net to browse community-contributed mcx simulations at https://neurojson.io)\n"S_MAGENTA"\
-       %s -N\n" S_RESET"\
-or (run user-shared mcx simulations, see full list at https://neurojson.org/db/mcx)\n"S_MAGENTA"\
-       %s -N aircube60\n" S_RESET"\
-or (print in simplified Chinese using -y/--lang)\n"S_MAGENTA"\
-       %s -y zh_CN -Q cube60\n" S_RESET"\
-or (use -f - to read piped input file modified by shell text processing utilities)\n"S_MAGENTA"\
-       %s -Q cube60 --dumpjson | sed -e 's/pencil/cone/g' | %s -f -\n" S_RESET"\
-or (download/modify simulations from NeuroJSON.io and run with mcx -f)\n"S_MAGENTA"\
-       curl -s -X GET https://neurojson.io:7777/mcx/aircube60 | jq '.Forward.Dt = 1e-9' | %s -f" S_RESET"\n",
-           exename, exename, exename, exename, exename, exename, exename, exename, exename, exename, exename, exename, exename);
+       %s --bench cube60planar --dumpjson" S_RESET"\n",
+           exename, exename, exename, exename, exename, exename, exename);
 }

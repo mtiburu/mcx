@@ -2,7 +2,7 @@
 **  \mainpage Monte Carlo eXtreme - GPU accelerated Monte Carlo Photon Migration
 **
 **  \author Qianqian Fang <q.fang at neu.edu>
-**  \copyright Qianqian Fang, 2009-2025
+**  \copyright Qianqian Fang, 2009-2024
 **
 **  \section sref Reference
 **  \li \c (\b Fang2009) Qianqian Fang and David A. Boas,
@@ -52,7 +52,6 @@
 #define MAX_PATH_LENGTH     1024                         /**< max characters in a full file name string */
 #define MAX_SESSION_LENGTH  256                          /**< max session name length */
 #define MAX_DEVICE          256                          /**< max number of GPUs to be used */
-#define MAX_LANG_ID         32                           /**< max number of characters in the language code */
 
 #define MCX_CUDA_ERROR_LAUNCH_FAILED    719              /**< CUDA kernel launch error code */
 
@@ -67,7 +66,7 @@
 typedef unsigned int   uint;                             /**< use uint for unsigned int */
 typedef unsigned short ushort;                           /**< use ushort for unsigned short */
 
-enum TOutputType {otFlux, otFluence, otEnergy, otJacobian, otWP, otDCS, otRF, otL, otRFmus, otWLTOF, otWPTOF};   /**< types of output */
+enum TOutputType {otFlux, otFluence, otEnergy, otJacobian, otWP, otDCS, otRF, otL};   /**< types of output */
 enum TMCXParent  {mpStandalone, mpMATLAB, mpPython};                   /**< whether MCX is run in binary or mex mode */
 enum TOutputFormat {ofMC2, ofNifti, ofAnalyze, ofUBJSON, ofTX3, ofJNifti, ofBJNifti};           /**< output data format */
 enum TBoundary {bcUnknown, bcReflect, bcAbsorb, bcMirror, bcCyclic};            /**< boundary conditions */
@@ -161,7 +160,7 @@ typedef struct MCXGPUInfo {
     int core;                     /**< number of stream processors */
     int autoblock;                /**< optimized number of blocks to launch */
     int autothread;               /**< optimized number of threads to launch */
-    unsigned int maxgate;         /**< max number of time gates that can be saved in one call */
+    int maxgate;                  /**< max number of time gates that can be saved in one call */
     int maxmpthread;              /**< maximum thread number per multi-processor */
 } GPUInfo;
 
@@ -200,7 +199,7 @@ typedef struct MCXConfig {
 
     unsigned int maxgate;         /**<simultaneous recording gates*/
     int respin;                   /**<number of repeatitions (if positive), or number of divisions (if negative)*/
-    int printnum;                 /**<number of printed threads (for debugging)*/
+    unsigned int printnum;        /**<number of printed threads (for debugging)*/
     int gpuid;                    /**<the ID of the GPU to use, starting from 1, 0 for auto*/
 
     unsigned int* vol;            /**<pointer to the volume*/
@@ -223,6 +222,8 @@ typedef struct MCXConfig {
     char ismomentum;             /**<1 to save momentum transfer for detected photons, implies issavedet=1*/
     char istrajstokes;           /**<1 to save Stokes vector for trajectory data only */
     char isdumpjson;             /**<1 to save json */
+    char issvmc;                 /**<1 to preprocess volume for svmc, 0 do not*/
+    char use_surfacenets;        /**<1 to preprocess volume for svmc witm surfacenets, 0 do not*/
     char internalsrc;            /**<1 all photons launch positions are inside non-zero voxels, 0 let mcx search entry point*/
     int  zipid;                  /**<data zip method "zlib","gzip","base64","lzip","lzma","lz4","lz4hc"*/
     char srctype;                /**<0:pencil,1:isotropic,2:cone,3:gaussian,4:planar,5:pattern,\
@@ -260,7 +261,6 @@ typedef struct MCXConfig {
     float workload[MAX_DEVICE];  /**<an array storing the relative weight when distributing photons between multiple GPUs*/
     int parentid;                /**<flag for testing if mcx is executed inside matlab*/
     unsigned int runtime;        /**<variable to store the total kernel simulation time in ms*/
-    char langid[MAX_LANG_ID];    /**<lanage id, a string*/
 
     double energytot;            /**<total launched photon packet weights*/
     double energyabs;            /**<total absorbed photon packet weights*/
@@ -301,7 +301,7 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg);
 void mcx_usage(Config* cfg, char* exename);
 void mcx_printheader(Config* cfg);
 void mcx_loadvolume(char* filename, Config* cfg, int isbuf);
-void mcx_normalize(float field[], float scale, size_t fieldlen, int option, int pidx, int srcnum);
+void mcx_normalize(float field[], float scale, int fieldlen, int option, int pidx, int srcnum);
 void mcx_kahanSum(float* sum, float* kahanc, float input);
 int  mcx_readarg(int argc, char* argv[], int id, void* output, const char* type);
 void mcx_printlog(Config* cfg, char* str);
@@ -315,7 +315,6 @@ void mcx_convertcol2row(unsigned int** vol, uint3* dim);
 void mcx_convertcol2row4d(unsigned int** vol, uint4* dim);
 int  mcx_loadjson(cJSON* root, Config* cfg);
 int  mcx_keylookup(char* key, const char* table[]);
-int  mcx_keystartwith(char* key, const char* table[]);
 int  mcx_lookupindex(char* key, const char* index);
 int  mcx_parsedebugopt(char* debugopt, const char* debugflag);
 void mcx_savedetphoton(float* ppath, void* seeds, int count, int seedbyte, Config* cfg);
@@ -338,10 +337,6 @@ void mcx_prep_polarized(Config* cfg);
 void mcx_replayinit(Config* cfg, float* detps, int dimdetps[2], int seedbyte);
 void mcx_validatecfg(Config* cfg, float* detps, int dimdetps[2], int seedbyte);
 int  mcx_float2half2(float input[2]);
-cJSON* mcx_parsejson(const char* jbuf);
-
-extern cJSON* mcx_lang;       /**< JSON object holding the translations of the specified language */
-char* T_(const char* str);    /**< string translation function */
 
 #ifdef MCX_CONTAINER
 #ifdef __cplusplus
@@ -354,9 +349,9 @@ void mcx_python_flush(void);
 
 #if defined(MCX_CONTAINER) && (defined(MATLAB_MEX_FILE) || defined(OCTAVE_API_VERSION_NUMBER))
 #ifdef _OPENMP
-#define MCX_FPRINTF(fp,...) {if(omp_get_thread_num()==0) {(fp==stderr) ? mexPrintf(__VA_ARGS__) : fprintf(fp,__VA_ARGS__);}}  /**< macro to print messages, calls mexPrint if inside MATLAB */
+#define MCX_FPRINTF(fp,...) {if(omp_get_thread_num()==0) mexPrintf(__VA_ARGS__);}  /**< macro to print messages, calls mexPrint if inside MATLAB */
 #else
-#define MCX_FPRINTF(fp,...) {(fp==stderr) ? mexPrintf(__VA_ARGS__) : fprintf(fp,__VA_ARGS__);} /**< macro to print messages, calls mexPrint in MATLAB */
+#define MCX_FPRINTF(fp,...) mexPrintf(__VA_ARGS__) /**< macro to print messages, calls mexPrint in MATLAB */
 #endif
 #else
 #define MCX_FPRINTF(fp,...) fprintf(fp,__VA_ARGS__) /**< macro to print messages, calls fprintf in command line mode */

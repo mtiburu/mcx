@@ -7,8 +7,8 @@
 % This demo is similar to the MCX simulation used for Fig. 3(c) in [Yan2020]
 % and Fig. 9(a) in [TranYan2019].
 %
-% [Sanchez2012] C.E.Sanchez J.E.Richards and C.R.Almli, "Age-Specific MRI Templates
-% for Pediatric Neuroimaging," Developmental Neuropsychology 37, 379–399 (2012).
+% [Sanchez2012] C.E.Sanchez J.E.Richards and C.R.Almli, “Age-Specific MRI Templates
+% for Pediatric Neuroimaging,” Developmental Neuropsychology 37, 379–399 (2012).
 %
 % [Yan2020] Shijie Yan and Qianqian Fang, "Hybrid mesh and voxel based Monte
 % Carlo algorithm for accurate and efficient photon transport modeling in
@@ -18,10 +18,11 @@
 % functional near-infrared spectroscopy analysis using mesh-based anatomical and
 % light-transport models," Neurophoton. 7(1) 015008 (22 February 2020)
 %
-% This file is part of Monte Carlo eXtreme (MCX) URL:https://mcx.space
+% This file is part of Monte Carlo eXtreme (MCX) URL:http://mcx.sf.net
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-clear cfg cfg_svmc;
+clear cfg cfg_mcx cfg_sn;
+% NOTE: MC (cfg_svmc) commented out for SN debugging
 
 %% common MC setup
 cfg.nphoton = 1e8;
@@ -37,7 +38,7 @@ cfg.issrcfrom0 = 1;
 cfg.prop = [0.0   0.0   1.0  1.0    % background medium
             0.019 7.8   0.89 1.37   % scalp
             0.019 7.8   0.89 1.37   % skull
-            0.0004 0.009 0.89 1.37  % CSF
+            0.004 0.009 0.89 1.37   % CSF
             0.02  9.0   0.89 1.37   % gray matter
             0.08  40.9  0.84 1.37   % white matter
             0.0   0.0   1.0  1.0];  % air cavity
@@ -65,29 +66,33 @@ load('fullhead_atlas.mat');
 cfg_mcx = cfg;
 cfg_mcx.vol = USC_atlas;
 
-%% prepare svmc input volume
-addpath('../../utils');
-tic;
-[svmcvol] = mcxsvmc(USC_atlas, 'smoothing', 1);
-fprintf('SVMC preprocessing complete, ');
-toc;
+%% prepare svmc input volume - COMMENTED OUT
+% cfg_svmc = cfg;
+% cfg_svmc.vol = uint8(USC_atlas);
+% cfg_svmc.srcpos = cfg_svmc.srcpos + 0.5;
+% cfg_svmc.issvmc = 1;  % SVMC (MC mode)
 
-cfg_svmc = cfg;
-cfg_svmc.srcpos = cfg_svmc.srcpos + 0.5;
-cfg_svmc.vol = uint8(svmcvol);
+%% prepare sn input volume
+cfg_sn = cfg;
+cfg_sn.vol = uint8(USC_atlas);
+cfg_sn.srcpos = cfg_sn.srcpos + 0.5;
+cfg_sn.issvmc = 2;  % Surface Nets (SN mode)
 
 %% run simulations
 addpath ../;
 output_vmc = mcxlab(cfg_mcx);   % conventional vmc
-output_svmc = mcxlab(cfg_svmc); % svmc
+% output_svmc = mcxlab(cfg_svmc); % svmc (MC mode) - COMMENTED OUT
+output_sn = mcxlab(cfg_sn);     % surface nets (SN mode)
 
 %% convert time-resolved fluence to CW fluence
 phi_vmc = sum(output_vmc.data, 4);
-phi_svmc = sum(output_svmc.data, 4);
+% phi_svmc = sum(output_svmc.data, 4);
+phi_sn = sum(output_sn.data, 4);
 
 %% replace zero with nan
 phi_vmc(phi_vmc == 0) = nan;
-phi_svmc(phi_svmc == 0) = nan;
+% phi_svmc(phi_svmc == 0) = nan;
+phi_sn(phi_sn == 0) = nan;
 
 %% compare CW fluence distributions using contour lines
 y_plane = 90.5; % coronal plane selected for fluence plot
@@ -95,17 +100,30 @@ y_plane = 90.5; % coronal plane selected for fluence plot
 
 % interpolate SVMC results to slice y=91 (as marching cube mesh has an spatial offset of 0.5)
 y = 0.5:((size(USC_atlas, 2) - 0.5));
-phi_svmc_y_pivot = permute(phi_svmc, [2, 1, 3]);
-phi_svmc_interp = squeeze(interp1(y, phi_svmc_y_pivot, y_plane + 0.5));
+% phi_svmc_y_pivot = permute(phi_svmc, [2, 1, 3]);
+% phi_svmc_interp = squeeze(interp1(y, phi_svmc_y_pivot, y_plane + 0.5));
 
-% plot CW fluence distribution using contour lines
+% interpolate SN results to slice y=91
+phi_sn_y_pivot = permute(phi_sn, [2, 1, 3]);
+phi_sn_interp = squeeze(interp1(y, phi_sn_y_pivot, y_plane + 0.5));
+
+%% Compare SN vs VMC (MC commented out)
 figure;
 clines = -20:0.5:0;
-contourf(xx - 0.5, zz - 0.5, log10(abs(phi_svmc_interp')), clines, 'linestyle', '-', ...
-         'linecolor', 'k', 'linewidth', 2, 'DisplayName', 'SVMC');
+
+% VMC as filled contour (background)
+contourf(xx, zz, log10(abs(squeeze(phi_vmc(:, ceil(y_plane), :))')), clines, 'linestyle', '-', ...
+         'linecolor', 'w', 'linewidth', 1.5, 'DisplayName', 'VMC');
 hold on;
-contour(xx, zz, log10(abs(squeeze(phi_vmc(:, ceil(y_plane), :))')), clines, 'linestyle', '--', ...
-        'linecolor', 'w', 'linewidth', 2, 'DisplayName', 'VMC');
+
+% MC (SVMC) contour lines in black - COMMENTED OUT
+% contour(xx - 0.5, zz - 0.5, log10(abs(phi_svmc_interp')), clines, 'linestyle', '-', ...
+%         'linecolor', 'k', 'linewidth', 2, 'DisplayName', 'MC');
+
+% SN contour lines in red
+contour(xx - 0.5, zz - 0.5, log10(abs(phi_sn_interp')), clines, 'linestyle', '--', ...
+        'linecolor', 'r', 'linewidth', 2, 'DisplayName', 'SN');
+
 colorbar('EastOutside');
 
 % plot tissue boundaries
@@ -114,7 +132,7 @@ contour(squeeze(USC_atlas(:, ceil(y_plane), :))', 'linestyle', '--', ...
 
 axis equal;
 lg = legend;
-set(lg, 'color', '[0.5 0.5 0.5]');
+set(lg, 'color', [0.5 0.5 0.5]);
 set(lg, 'box', 'on');
 
 set(gca, 'ylim', [160 220]);
@@ -122,4 +140,5 @@ ylabel('z(mm)');
 set(gca, 'xlim', [45 165]);
 xlabel('x(mm)');
 set(gca, 'clim', [-12 0]);
+title('SN vs VMC');
 set(gca, 'fontsize', 18);

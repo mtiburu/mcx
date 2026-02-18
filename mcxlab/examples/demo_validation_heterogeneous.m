@@ -12,7 +12,7 @@
 % [Fang2010] Fang Q, "Mesh-based Monte Carlo method using fast ray-tracing
 %    in Plücker coordinates," Biomed. Opt. Express 1, 165-175 (2010)
 %
-% This file is part of Monte Carlo eXtreme (MCX) URL:https://mcx.space
+% This file is part of Monte Carlo eXtreme (MCX) URL:http://mcx.sf.net
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 if (exist('sphdiffusionslab', 'file') ~= 2)

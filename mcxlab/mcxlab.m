@@ -3,7 +3,7 @@ function varargout = mcxlab(varargin)
 % ====================================================================
 %      MCXLAB - Monte Carlo eXtreme (MCX) for MATLAB/GNU Octave
 % --------------------------------------------------------------------
-% Copyright (c) 2011-2025 Qianqian Fang <q.fang at neu.edu>
+% Copyright (c) 2011-2024 Qianqian Fang <q.fang at neu.edu>
 %                      URL: https://mcx.space
 % ====================================================================
 %
@@ -28,9 +28,7 @@ function varargout = mcxlab(varargin)
 %    mcxlab and mcxlabcl calls will use mcxcl.mex; by setting option='cuda', one can
 %    force both mcxlab and mcxlabcl to use mcx (cuda version). Similarly, if
 %    USE_MCXCL=0, all mcxlabcl and mcxlab call will use mcx.mex by default, unless
-%    one sets option='opencl'. When USE_MCXCL is set to a positive integer
-%    or a string, it overwrites cfg.gpuid in mcxlabcl to specify the device
-%    to run the simulation.
+%    one set option='opencl'.
 %
 %    cfg may contain the following fields:
 %
@@ -86,8 +84,7 @@ function varargout = mcxlab(varargin)
 %      If any of the 4 compnents present, they should have matching row number.
 %
 % == MC simulation settings ==
-%      cfg.seed:       seed for the random number generator (integer) [default 1648335518]
-%                      setting seed to a negative integer or 0 uses system clock as seed;
+%      cfg.seed:       seed for the random number generator (integer) [0]
 %                      if set to a uint8 array, the binary data in each column is used
 %                      to seed a photon (i.e. the "replay" mode)
 %                      Example: <demo_mcxlab_replay.m>
@@ -111,7 +108,7 @@ function varargout = mcxlab(varargin)
 %                      '0': this face is not used to detector photons
 %                      '1': this face is used to capture photons (if output detphoton)
 %                      see <demo_bc_det.m>
-%      cfg.isnormalized:[1]-normalize the output fluence to unitary source, 0-no normalization.
+%      cfg.isnormalized:[1]-normalize the output fluence to unitary source, 0-no reflection.
 %                      setting isnormalized to 2 in the replay mode builds the Jacobian
 %                      with Born approximation instead of the default Rytov approximation
 %      cfg.isspecular: 1-calculate specular reflection if source is outside, [0] no specular reflection
@@ -165,7 +162,10 @@ function varargout = mcxlab(varargin)
 %                      i, if prop(i,2) is not zero: 1) if prop(i,3) == 1, the
 %                      density polprop(i,3) will be adjusted to achieve the target
 %                      mus prop(i,2); 2) if prop(i,3) < 1, polprop(i,3) will be
-%                      adjusted to achieve the target mus' prop(i,2)*(1-prop(i,3))
+%                      adjusted to achieve the target mus prop(i,2)*(1-prop(i,3))
+%      cfg.issvmc:     [0]-do not use SVMC, 1-preprocess volume for SVMC (MC mode),
+%                      2-preprocess volume for SVMC with Surface Nets (SN mode).
+%
 %
 % == GPU settings ==
 %      cfg.autopilot:  1-automatically set threads and blocks, [0]-use nthread/nblocksize
@@ -232,14 +232,7 @@ function varargout = mcxlab(varargin)
 %                      'zgaussian' - an angular gaussian beam, srcparam1(1) specifies the variance in the zenith angle
 %                      'line' - a line source, emitting from the line segment between
 %                               cfg.srcpos and cfg.srcpos+cfg.srcparam(1:3), radiating
-%                               uniformly in the perpendicular direction;
-%                               when cfg.srcparam2.x is non-zero, it
-%                               creates a wedge-source (or fan-beam), where
-%                               the launch directions are still
-%                               perpendicular to the source line segment,
-%                               but rotated by the wedge half-angle
-%                               cfg.srcparam2.x (in radian) from the plane
-%                               spanned by cfg.srcdir and the source line
+%                               uniformly in the perpendicular direction
 %                      'slit' [*] - a colimated slit beam emitting from the line segment between
 %                               cfg.srcpos and cfg.srcpos+cfg.srcparam(1:3), with the initial
 %                               dir specified by cfg.srcdir; when user defines positive values for srcparam2.x or .y,
@@ -316,17 +309,9 @@ function varargout = mcxlab(varargin)
 %                      'wm' - weighted momentum transfer for a source/detector pair (replay mode)
 %                      'rf' frequency-domain (FD/RF) mua Jacobian (replay mode),
 %                      'length' total pathlengths accumulated per voxel,
-%                      'rfmus' frequency domain/RF mus Jacobian by replay,
-%                      'wltof' weighted average of time-of-flight x total path length in each voxel,
-%                      'wptof' weighted average of time-of-flight x total scattering count in each voxel
-%
-%                      for types jacobian/wl/wp, example: <demo_mcxlab_replay.m>
-%                          and  <demo_replay_timedomain.m>
-%                      for types rf, example: <demo_replay_frequencydomain.m>
-%                      for types rfmus/wltof/wptof, example: <demo_replay_all_jacobian.m>
+%                      for type jacobian/wl/wp, example: <demo_mcxlab_replay.m>
+%                      and  <demo_replay_timedomain.m>
 %      cfg.session:    a string for output file names (only used when no return variables)
-%      cfg.lang:       specify the language code for printing, supported languages include
-%                      zh_CN, zh_TW, ja_JP, fr_CA, es_MX, de_DE, ko_KR, hi_IN, pt_BR
 %
 % == Debug ==
 %      cfg.debuglevel:  debug flag string (case insensitive), one or a combination of ['R','M','P','T'], no space
@@ -334,12 +319,6 @@ function varargout = mcxlab(varargin)
 %                    'M':  return photon trajectory data as the 5th output
 %                    'P':  show progress bar
 %                    'T':  save photon trajectory data only, as the 1st output, disable flux/detp/seeds outputs
-%      cfg.flog: [2]  log printing control; if set to a string, it defines a file path
-%                     at which location the log will be printed in append mode; on Linux and Mac OS,
-%                     one can use special paths such as /dev/null; if set to an integer,
-%                     2 (default): stderr
-%                     1: stdout
-%                     0: stdout but suppress printing MCX banner
 %      cfg.istrajstokes [0]: if set to 1, traj.iquv output contains the Stokes IQUV vector along trajectories
 %      cfg.maxjumpdebug: [10000000|int] when trajectory is requested in the output,
 %                     use this parameter to set the maximum position stored. By default,
@@ -466,17 +445,7 @@ end
 
 if (isstruct(varargin{1}))
     for i = 1:length(varargin{1})
-        if (ischar(useopencl) || useopencl > 0)
-            varargin{1}(i).gpuid = useopencl;
-        elseif (useopencl < 0)
-            varargin{1}(i).gpuid = -useopencl;
-        end
-        castlist = {'srcpattern', 'srcpos', 'detpos', 'prop', 'workload', 'srcdir', 'srciquv', 'isnormalized', ...
-                    'isreflect', 'nphoton', 'nblocksize', 'nthread', 'tstart', 'tend', 'maxdetphoton', 'maxgate', ...
-                    'respin', 'isref3', 'isrefint', 'isgpuinfo', 'issrcfrom0', 'autopilot', 'minenergy', 'unitinmm', ...
-                    'voidtime', 'issavedet', 'issaveseed', 'issaveref', 'issaveexit', 'ismomentum', 'isspecular', ...
-                    'replaydet', 'maxvoidstep', 'maxjumpdebug', 'gscatter', 'srcnum', 'srcid', 'omega', 'issave2pt', ...
-                    'lamda', 'steps', 'crop0', 'crop1'};
+        castlist = {'srcpattern', 'srcpos', 'detpos', 'prop', 'workload', 'srcdir', 'srciquv'};
         for j = 1:length(castlist)
             if (isfield(varargin{1}(i), castlist{j}))
                 varargin{1}(i).(castlist{j}) = double(varargin{1}(i).(castlist{j}));
@@ -527,7 +496,7 @@ if (nargout >= 1 && exist('isargout', 'builtin') && isargout(1) == 0)
     end
 end
 
-if (useopencl <= 0)
+if (useopencl == 0)
     [varargout{1:max(1, nargout)}] = mcx(varargin{1});
 else
     [varargout{1:max(1, nargout)}] = mcxcl(varargin{1});
@@ -587,8 +556,6 @@ if (nargout >= 2)
             flags = {cfg(i).savedetflag};
             if (isfield(cfg(i), 'issaveref'))
                 flags{end + 1} = cfg(i).issaveref;
-            else
-                flags{end + 1} = 0;
             end
             if (isfield(cfg(i), 'srcnum'))
                 flags{end + 1} = cfg(i).srcnum;
@@ -629,7 +596,6 @@ if (nargout >= 5 || (~isempty(cfg) && isstruct(cfg) && isfield(cfg, 'debuglevel'
         traj.srcid = int32(data(6, :)');
         if (size(data, 1) >= 10)
             traj.iquv = data(7:10, :)';
-            traj.iquv = traj.iquv(idx, :);
         end
         traj.data = [single(traj.id)'; data(2:end, idx)];
         newtraj(i) = traj;
