@@ -15,6 +15,7 @@ usage() {
     echo "  mex          Build MATLAB mex file"
     echo "  bench        Run benchmark (requires mcx build)"
     echo "  plot         Launch MATLAB to plot SVMC results"
+    echo "  demo         Run mcxlab SVMC demo scripts"
     echo "  clean        Clean build artifacts"
     echo ""
     echo "Benchmark options (with 'bench' command):"
@@ -30,6 +31,12 @@ usage() {
     echo "  --both       Plot both MC and SN"
     echo "  --gui        Launch MATLAB with GUI (default: no GUI)"
     echo ""
+    echo "Demo options (with 'demo' command):"
+    echo "  cubesph      Run demo_svmc_cubesph.m"
+    echo "  sphshells    Run demo_svmc_sphshells.m"
+    echo "  brain        Run demo_svmc_brain19_5.m"
+    echo "  --gui        Launch MATLAB with GUI (default: no GUI)"
+    echo ""
     echo "Examples:"
     echo "  $0 mcx                    # Build mcx binary"
     echo "  $0 mex                    # Build mex file"
@@ -37,6 +44,8 @@ usage() {
     echo "  $0 bench --both -n 1e8    # Run both with 1e8 photons"
     echo "  $0 plot --sn              # Plot SN results"
     echo "  $0 plot --both --gui      # Plot both with MATLAB GUI"
+    echo "  $0 demo cubesph           # Run cubesph demo"
+    echo "  $0 demo brain --gui       # Run brain demo with GUI"
 }
 
 build_mcx() {
@@ -84,6 +93,68 @@ run_bench() {
     esac
 }
 
+run_demo() {
+    local demo=""
+    local gui=""
+    
+    # Check for mex binary, build if missing
+    local mex_file
+    if [[ -f "$MCX_DIR/mcxlab/mcx.mexmaca64" ]]; then
+        mex_file="$MCX_DIR/mcxlab/mcx.mexmaca64"
+    elif [[ -f "$MCX_DIR/mcxlab/mcx.mexmaci64" ]]; then
+        mex_file="$MCX_DIR/mcxlab/mcx.mexmaci64"
+    elif [[ -f "$MCX_DIR/mcxlab/mcx.mexa64" ]]; then
+        mex_file="$MCX_DIR/mcxlab/mcx.mexa64"
+    else
+        echo "Mex binary not found in $MCX_DIR/mcxlab/"
+        echo "Building mex first..."
+        echo ""
+        build_mex
+        if [[ $? -ne 0 ]]; then
+            echo "Error: mex build failed"
+            exit 1
+        fi
+        # Re-check for the built binary
+        if [[ -f "$MCX_DIR/mcxlab/mcx.mexmaca64" ]]; then
+            mex_file="$MCX_DIR/mcxlab/mcx.mexmaca64"
+        elif [[ -f "$MCX_DIR/mcxlab/mcx.mexmaci64" ]]; then
+            mex_file="$MCX_DIR/mcxlab/mcx.mexmaci64"
+        elif [[ -f "$MCX_DIR/mcxlab/mcx.mexa64" ]]; then
+            mex_file="$MCX_DIR/mcxlab/mcx.mexa64"
+        else
+            echo "Error: mex build did not produce expected binary"
+            exit 1
+        fi
+        echo ""
+    fi
+    echo "Using mex: $mex_file"
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            cubesph)    demo="demo_svmc_cubesph"; shift ;;
+            sphshells)  demo="demo_svmc_sphshells"; shift ;;
+            brain)      demo="demo_svmc_brain19_5"; shift ;;
+            --gui)      gui=1; shift ;;
+            *)          echo "Unknown demo: $1"; exit 1 ;;
+        esac
+    done
+    
+    if [[ -z "$demo" ]]; then
+        echo "Error: specify a demo (cubesph, sphshells, brain)"
+        exit 1
+    fi
+    
+    local cmd="addpath('$MCX_DIR/mcxlab'); addpath('$MCX_DIR/mcxlab/examples'); $demo;"
+    [[ -n "$gui" ]] && cmd+="pause;"
+    
+    echo "Running $demo.m..."
+    if [[ -n "$gui" ]]; then
+        matlab -nodesktop -nosplash -r "$cmd"
+    else
+        matlab -batch "$cmd"
+    fi
+}
+
 run_plot() {
     local mode="sn"
     local gui=""
@@ -124,6 +195,7 @@ case "${1:-}" in
     mcx)    build_mcx ;;
     mex)    build_mex ;;
     bench)  shift; run_bench "$@" ;;
+    demo)   shift; run_demo "$@" ;;
     plot)   shift; run_plot "$@" ;;
     clean)  cd "$SRC_DIR" && make clean ;;
     -h|--help|"") usage ;;

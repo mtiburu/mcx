@@ -179,7 +179,6 @@ void mcx_svmc_preprocess_surfacenets(Config* cfg, GPUInfo* gpu) {
 
     MCX_FPRINTF(cfg->flog, "[SN Debug] voxelsize=[%f,%f,%f]\n", voxelsize[0], voxelsize[1], voxelsize[2]);
 
-    // ADD THESE TWO LINES:
     analyze_quads(quads);
     analyze_voxel_assignment(quads, h_vol_labels, dims);
     
@@ -311,7 +310,6 @@ MCX_FPRINTF(cfg->flog, "[SN Debug] Assigned voxel pairs: 0-1=%d, 0-2=%d, 0-3=%d,
         }
     }
 
-    // ========== ADD NEW DIAGNOSTICS HERE ==========
     
     // How many quads assigned per voxel?
     int voxels_with_1_quad = 0;
@@ -348,8 +346,7 @@ MCX_FPRINTF(cfg->flog, "[SN Debug] Assigned voxel pairs: 0-1=%d, 0-2=%d, 0-3=%d,
         }
     }
     MCX_FPRINTF(cfg->flog, "[SN Debug] Centroids far from assigned voxel: %d\n", out_of_bounds);
-    
-    // ========== END NEW DIAGNOSTICS ==========
+
 
     delete[] h_accums;
     
