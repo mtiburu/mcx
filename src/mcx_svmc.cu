@@ -595,7 +595,7 @@ printf("Voxels with up > 0: %d\n", up_nonzero);
 
     // --- Dump to file for MATLAB visualization ---
     char svmcfile[512];
-    snprintf(svmcfile, sizeof(svmcfile), "dump_mcs_output.bin");
+    snprintf(svmcfile, sizeof(svmcfile), "dump_svmc_mc.bin");
     FILE* fsvmc = fopen(svmcfile, "wb");
 
     if (!fsvmc) {

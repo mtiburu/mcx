@@ -1,1166 +1,572 @@
+// =============================================================================
+// mcx_svmc_sn.cu  –  Surface Nets SVMC preprocessing
+//
+// Mirrors the Marching Cubes pipeline in mcx_svmc.cu exactly, replacing
+// MC's per-label Gaussian-blur + triangle extraction with SN's vertex-centric
+// approach:
+//
+//   MC pipeline (per label):
+//     gaussian_blur → split_voxel kernel (MC lookup table, one thread/voxel)
+//
+//   SN pipeline (all labels at once):
+//     build SN → relax → CPU vertex loop → finalize_svmc_kernel (one thread/voxel)
+//
+// Key insight: SN already gives us one surface vertex per active cell.
+// That vertex's position IS the centroid (= vertexOffset), recoverable from
+// the first quad corner since getEdgeQuadVtxIndices always places the current
+// cell's vertex at quadVtxIndices[0] / corners[0..2].
+//
+// Storage convention (must match MC exactly):
+//   MC stores the geometry for the cube at blockIdx=(bx,by,bz) at storage
+//   index  idx1d = (bx+1) + (by+1)*dimx + (bz+1)*dimx*dimy,
+//   i.e., at the UPPER corner of the cube.
+//   The SN vertex at padded cell ci IS that upper corner (ci[i] = bx+i+1).
+//   We therefore store each vertex's record at idx = ci[0] + ci[1]*dimx + ci[2]*dimx*dimy,
+//   NOT at (ci[0]-1) + ... (lower corner), which would shift all geometry by
+//   one voxel in every dimension and cause the simulation to read the geometry
+//   for cube N when the photon is in cube N+1.
+//
+// Normal orientation convention (matches MC):
+//   MC computes  isosurface_normal = -normal  (points toward lower-label material).
+//   The analytical proof for all 12 edge types shows that the natural SN
+//   cross product (B-A)x(C-A) always points from labels[0] toward labels[1].
+//   Since labels are sorted so that labels[0] < labels[1] (lower < upper),
+//   the natural normal points lower->upper.  Negating gives upper->lower =
+//   toward-lower-label = MC convention.  No probe needed or used.
+//
+// Data flow:
+//   1. Build MMSurfaceNet + relax
+//   2. CPU vertex loop -> fills SVMCRecord[vol_length] (upper-corner indexed)
+//   3. Upload SVMCRecord array to GPU
+//   4. finalize_svmc_kernel: encode each record to 8-byte SVMC voxel
+//   5. repack_kernel: 8-byte contiguous -> MCX interleaved format
+// =============================================================================
+
 #include "MMCellMap.cuh"
 #include "MMSurfaceNet.cuh"
 #include "MMCellFlag.cuh"
 #include "mcx_svmc.h"
 #include "mcx_tictoc.h"
 #include "mcx_const.h"
+#include "mcx_vector_math.cu"
 
-#include <vector>
 #include <cstdio>
-#include <set>
-#include <map>
 #include <cmath>
+#include <algorithm>
 
-// ==========================================================
-// Data Structures 
-// ==========================================================
+// =============================================================================
+// Data structures
+// =============================================================================
 
-// Quad with ownership tracking - knows which cube edge it came from
-struct SNQuad {
-    float corners[12];      // 4 vertices × 3 coords
-    unsigned short labels[2]; // [lower, upper] material labels
-    int voxel1[3];     // Voxel with lower label
-    int voxel2[3];   // Voxel with upper label
-    int edge_axis;          // 0=X, 1=Y, 2=Z - axis of the edge
-
-    int owner[3];   // in ORIGINAL (unpadded) voxel coordinates
+/**
+ * One record per voxel, populated on the CPU from SN vertex data.
+ * Stored at the UPPER-CORNER index (ci[0], ci[1], ci[2]) to match MC.
+ */
+struct SVMCRecord {
+    float    cx, cy, cz;   /**< centroid_local in [0,1] (= SN vertexOffset) */
+    float    nx, ny, nz;   /**< area-weighted normal sum, MC convention (toward lower label) */
+    float    w;            /**< total quad area; 0 means homogeneous voxel */
+    uint32_t lower;        /**< lower material label (smaller index) */
+    uint32_t upper;        /**< upper material label (larger index) */
 };
 
-// Per-voxel accumulator 
-struct VoxelAccum {
-    float cx, cy, cz;       // Weighted centroid sum
-    float nx, ny, nz;       // Weighted normal sum  
-    float total_weight;     // Total area weight
-    unsigned int lower;   // Min label seen
-    unsigned int upper;   // Max label seen
-    int quad_count;         // Number of contributing quads
-};
+// =============================================================================
+// Forward declarations
+// =============================================================================
 
-enum SNDStage {
-    SNDBG_BEFORE_RELAX,
-    SNDBG_AFTER_RELAX,
-    SNDBG_AFTER_ASSIGN,
-    SNDBG_AFTER_FINALIZE
-};
-
-// Gate heavy debug with a macro so normal runs stay clean.
-#ifndef MCX_SN_DEBUG
-#define MCX_SN_DEBUG 0
-#endif
-
-static void debug_function(
-    Config* cfg,
-    SNDStage stage,
-    const std::vector<SNQuad>* quads,
+__global__ void finalize_svmc_kernel(
+    unsigned char*        gvol,
+    const SVMCRecord*     records,
     const unsigned short* vol_labels,
-    const int dims[3],
-    const float voxelsize[3],
-    const VoxelAccum* h_accums,   // optional (only after assign)
-    long vol_length,
-    const unsigned int* packed2u32 // optional (only after finalize)
-);
+    long   vol_length,
+    int    dimx, int dimy, int dimz,
+    float  vsx,  float vsy,  float vsz,
+    int    nMedia);
 
-__device__ __forceinline__ float3 compute_quad_centroid_proper(
-    float3 A, float3 B, float3 C, float3 D,
-    float3 n1, float3 n2  // Pre-computed triangle normals
-) {
-    // Triangle ABC centroid
-    float3 c1 = make_float3(
-        (A.x + B.x + C.x) / 3.0f,
-        (A.y + B.y + C.y) / 3.0f,
-        (A.z + B.z + C.z) / 3.0f
-    );
-    
-    // Triangle ACD centroid
-    float3 c2 = make_float3(
-        (A.x + C.x + D.x) / 3.0f,
-        (A.y + C.y + D.y) / 3.0f,
-        (A.z + C.z + D.z) / 3.0f
-    );
-    
-    // Triangle areas
-    float a1 = sqrtf(n1.x*n1.x + n1.y*n1.y + n1.z*n1.z);
-    float a2 = sqrtf(n2.x*n2.x + n2.y*n2.y + n2.z*n2.z);
-    
-    float total = a1 + a2;
-    if (total < 1e-12f) {
-        return make_float3(
-            (A.x + B.x + C.x + D.x) * 0.25f,
-            (A.y + B.y + C.y + D.y) * 0.25f,
-            (A.z + B.z + C.z + D.z) * 0.25f
-        );
-    }
-    
-    return make_float3(
-        (c1.x * a1 + c2.x * a2) / total,
-        (c1.y * a1 + c2.y * a2) / total,
-        (c1.z * a1 + c2.z * a2) / total
-    );
-}
-__device__ __forceinline__ int voxel_idx_3d_to_1d(int x, int y, int z, int dimx, int dimy);
-__device__ __forceinline__ float3 compute_triangle_normal(float3 A, float3 B, float3 C);
-__device__ __forceinline__ float triangle_area(float3 n);
-__device__ __forceinline__ float3 normalize_vec(float3 v);
-__device__ bool triangle_aabb_intersect( float3 v0, float3 v1, float3 v2, float3 box_min, float3 box_max);
-__global__ void assign_quads_to_voxels_kernel( const SNQuad* quads, int num_quads, VoxelAccum* accums,
-    const unsigned short* vol_labels,int dimx, int dimy, int dimz, float vsx, float vsy, float vsz);
-__global__ void finalize_svmc_kernel( unsigned char* gvol, const VoxelAccum* accums, const unsigned short* vol_labels,
-    long vol_length, int dimx, int dimy, int dimz, float vsx, float vsy, float vsz, int nMedia);
-std::vector<SNQuad> extract_quads_with_tracking( MMCellMap* cellmap, const unsigned short* vol_labels, int dims[3], float voxelsize[3]);
-void analyze_quads(const std::vector<SNQuad>& quads);
-void analyze_voxel_assignment(const std::vector<SNQuad>& quads,  const unsigned short* vol_labels, int dims[3]);
+__global__ void repack_kernel(
+    unsigned int*        newvol,
+    const unsigned char* gvol,
+    long                 vol_length);
 
+static void build_svmc_records(
+    MMCellMap*            cellmap,
+    const unsigned short* vol_labels,
+    int                   dims[3],
+    float                 voxelsize[3],
+    SVMCRecord*           records);
 
-void dump_quads_obj(const std::vector<SNQuad>& quads, const char* filename);
-// ==========================================================
-// Main Processing Function
-// ==========================================================
+// =============================================================================
+// Main entry point
+// =============================================================================
 
 void mcx_svmc_preprocess_surfacenets(Config* cfg, GPUInfo* gpu) {
     if (cfg->mediabyte > 4 || !cfg->issvmc) return;
-    
+
     MCX_FPRINTF(cfg->flog, "Surface Nets SVMC preprocessing...\n");
     unsigned int tic = StartTimer();
-    
-    int dims[3] = {(int)cfg->dim.x, (int)cfg->dim.y, (int)cfg->dim.z};
-    float voxelsize[3] = {cfg->unitinmm, cfg->unitinmm, cfg->unitinmm};
-    long vol_length = (long)dims[0] * dims[1] * dims[2];
-    
-    // Prepare label volume
+
+    int   dims[3]      = {(int)cfg->dim.x, (int)cfg->dim.y, (int)cfg->dim.z};
+    float voxelsize[3] = {cfg->unitinmm,   cfg->unitinmm,   cfg->unitinmm};
+    long  vol_length   = (long)dims[0] * dims[1] * dims[2];
+
+    // ----- 1. Prepare host label volume -----
     unsigned short* h_vol_labels = new unsigned short[vol_length];
     for (long i = 0; i < vol_length; i++) {
         unsigned short lbl = (unsigned short)(cfg->vol[i] & MED_MASK);
-        h_vol_labels[i] = (lbl == 0xFFFF) ? 0 : lbl;
+        h_vol_labels[i]    = (lbl == 0xFFFF) ? 0 : lbl;
     }
-    
-    // Build and relax Surface Net
+
+    // ----- 2. Build and relax Surface Net -----
     MCX_FPRINTF(cfg->flog, "[SN] Building mesh...\n");
     MMSurfaceNet sn(h_vol_labels, dims, voxelsize);
-    // Extract and dump BEFORE relax
-    std::vector<SNQuad> quads_before = extract_quads_with_tracking(sn.cellMap(), h_vol_labels, dims, voxelsize);
-    dump_quads_obj(quads_before, "dump_BEFORE_relax.obj");
 
-    debug_function(cfg, SNDBG_BEFORE_RELAX, &quads_before, h_vol_labels, dims, voxelsize, nullptr, vol_length, nullptr);
-        
     MCX_FPRINTF(cfg->flog, "[SN] Relaxing mesh...\n");
-/*
- Surface relaxation parameters for Surface Nets smoothing.
-
- numRelaxIterations
-   Number of relaxation passes applied to surface vertices.
-   Higher values increase smoothness but also increase runtime
-   and amplify drift toward the center of the mesh.
-   Typical range: 10–40 for tuning, 60–120 for final output.
-
- relaxFactor
-   Per-iteration movement scale applied to each vertex.
-   Range is strictly between 0.0 and 1.0.
-   Larger values move vertices faster but increase the risk
-   of instability, folding, and corner collapse.
-   This controls how aggressive each relaxation step is.
-
- maxDistFromCellCenter
-   Hard clamp on how far a vertex is allowed to move from the
-   center of its original surface cube, measured in voxel units.
-   This constraint prevents surface shrinkage, self-intersection,
-   and loss of label fidelity near boundaries.
-   Values around 1.0 keep vertices tightly bound,
-   values above 1.5 allow stronger smoothing.
- */
-
-    MMSurfaceNet::RelaxAttrs relaxAttrs{10, 0.5f, 1.0f}; 
+    // maxDistFromCenter MUST stay < 0.5 so vertices remain inside their own cell.
+    // Values >= 0.5 allow drift into a neighbouring cell, placing the centroid
+    // outside [0,1] in local coordinates (clamped to the cell face = wrong geometry).
+    // 0.45 gives a small safety margin.
+    MMSurfaceNet::RelaxAttrs relaxAttrs{10, 0.5f, 0.45f};
     sn.relax(relaxAttrs);
 
-    // Extract and dump AFTER relax
-    std::vector<SNQuad> quads = extract_quads_with_tracking(sn.cellMap(), h_vol_labels, dims, voxelsize);
-    dump_quads_obj(quads, "dump_AFTER_relax.obj");
+    // ----- 3. CPU vertex loop: build SVMCRecord array -----
+    MCX_FPRINTF(cfg->flog, "[SN] Building SVMC records from vertices...\n");
+    SVMCRecord* h_records = new SVMCRecord[vol_length]();   // zero-initialised
 
-    debug_function(cfg, SNDBG_AFTER_RELAX, &quads, h_vol_labels, dims, voxelsize, nullptr, vol_length, nullptr);
+    build_svmc_records(sn.cellMap(), h_vol_labels, dims, voxelsize, h_records);
 
-    MCX_FPRINTF(cfg->flog, "[SN Debug] voxelsize=[%f,%f,%f]\n", voxelsize[0], voxelsize[1], voxelsize[2]);
+    // Count active voxels for logging
+    long active = 0;
+    for (long i = 0; i < vol_length; i++)
+        if (h_records[i].w > 0.0f) active++;
+    MCX_FPRINTF(cfg->flog, "[SN] Active surface voxels: %ld / %ld\n", active, vol_length);
 
-    analyze_quads(quads);
-    analyze_voxel_assignment(quads, h_vol_labels, dims);
-    
-    // // Extract quads with tracking
-    // MCX_FPRINTF(cfg->flog, "[SN] Extracting quads...\n");
-    // std::vector<SNQuad> quads = extract_quads_with_tracking(sn.cellMap(), h_vol_labels, dims);
-    // MCX_FPRINTF(cfg->flog, "[SN] Extracted %zu quads\n", quads.size());
-    // Count label pairs in quads
-int pair_01 = 0, pair_02 = 0, pair_12 = 0, other = 0;
-for (const auto& q : quads) {
-    if (q.labels[0] == 0 && q.labels[1] == 1) pair_01++;
-    else if (q.labels[0] == 0 && q.labels[1] == 2) pair_02++;
-    else if (q.labels[0] == 1 && q.labels[1] == 2) pair_12++;
-    else other++;
-}
-MCX_FPRINTF(cfg->flog, "[SN Debug] Quad label pairs: 0-1=%d, 0-2=%d, 1-2=%d, other=%d\n",
-    pair_01, pair_02, pair_12, other);
-
-// Count labels in volume
-int label_counts[10] = {0};
-for (long i = 0; i < vol_length; i++) {
-    if (h_vol_labels[i] < 10) label_counts[h_vol_labels[i]]++;
-}
-MCX_FPRINTF(cfg->flog, "[SN Debug] Volume labels: ");
-for (int l = 0; l < 10; l++) {
-    if (label_counts[l] > 0) {
-        MCX_FPRINTF(cfg->flog, "L%d=%d ", l, label_counts[l]);
+    // ----- Debug: comparison at known MC boundary voxels -----
+    {
+        const int check_voxels[][3] = {
+            {28,26,15}, {29,26,15}, {30,26,15}, {31,26,15}, {32,26,15}
+        };
+        MCX_FPRINTF(cfg->flog, "[SN] Record check at MC-known boundary voxels:\n");
+        for (int k = 0; k < 5; k++) {
+            int x = check_voxels[k][0];
+            int y = check_voxels[k][1];
+            int z = check_voxels[k][2];
+            if (x>=dims[0]||y>=dims[1]||z>=dims[2]) continue;
+            long i = (long)x + (long)y*dims[0] + (long)z*dims[0]*dims[1];
+            const SVMCRecord& r = h_records[i];
+            unsigned short own = h_vol_labels[i];
+            if (r.w > 0.f) {
+                float len = sqrtf(r.nx*r.nx + r.ny*r.ny + r.nz*r.nz);
+                float nnx = len>0 ? r.nx/len : 0.f;
+                float nny = len>0 ? r.ny/len : 0.f;
+                float nnz = len>0 ? r.nz/len : 0.f;
+                MCX_FPRINTF(cfg->flog,
+                    "  SN vox(%d,%d,%d): own=%u lo=%u hi=%u "
+                    "c=(%.3f,%.3f,%.3f) n=(%.3f,%.3f,%.3f)\n",
+                    x, y, z, own, r.lower, r.upper,
+                    r.cx, r.cy, r.cz, nnx, nny, nnz);
+            } else {
+                MCX_FPRINTF(cfg->flog,
+                    "  SN vox(%d,%d,%d): own=%u  NO RECORD\n", x, y, z, own);
+            }
+        }
     }
-}
-MCX_FPRINTF(cfg->flog, "\n");
 
-    MCX_FPRINTF(cfg->flog, "[SN Debug] First 5 quads:\n");
-    for (int i = 0; i < min(5, (int)quads.size()); i++) {
-        MCX_FPRINTF(cfg->flog, "  Quad %d: labels=[%d,%d] voxel1=[%d,%d,%d] voxel2=[%d,%d,%d]\n",
-            i, quads[i].labels[0], quads[i].labels[1],
-            quads[i].voxel1[0], quads[i].voxel1[1], quads[i].voxel1[2],
-            quads[i].voxel2[0], quads[i].voxel2[1], quads[i].voxel2[2]);
+    // ----- Dump centroids + normals for MATLAB visualization -----
+    // Format: vol_length x 6 float32 values per voxel: [wx, wy, wz, nx, ny, nz]
+    // wx/wy/wz are world-space centroid positions in voxel units.
+    {
+        FILE* fv = fopen("dump_vec_sn.bin", "wb");
+        if (fv) {
+            for (long i = 0; i < vol_length; i++) {
+                const SVMCRecord& r = h_records[i];
+                float row[6] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+                if (r.w > 1e-12f) {
+                    // Upper-corner idx: vx=ci[0]. Cube lower corner is (vx-1).
+                    int vx = (int)(i % dims[0]);
+                    int vy = (int)((i / dims[0]) % dims[1]);
+                    int vz = (int)(i / ((long)dims[0] * dims[1]));
+                    row[0] = (float)(vx - 1) + r.cx;
+                    row[1] = (float)(vy - 1) + r.cy;
+                    row[2] = (float)(vz - 1) + r.cz;
+                    float len = sqrtf(r.nx*r.nx + r.ny*r.ny + r.nz*r.nz);
+                    if (len > 1e-12f) {
+                        row[3] = r.nx / len;
+                        row[4] = r.ny / len;
+                        row[5] = r.nz / len;
+                    }
+                }
+                fwrite(row, sizeof(float), 6, fv);
+            }
+            fclose(fv);
+            MCX_FPRINTF(cfg->flog, "[SN] Wrote centroids+normals -> dump_vec_sn.bin\n");
+        }
     }
-    
-    if (quads.empty()) {
-        MCX_FPRINTF(stderr, "[SN Error] No quads extracted!\n");
-        delete[] h_vol_labels;
-        return;
-    }
-    
-    // Allocate device memory
-    SNQuad* d_quads;
+
+    // ----- 4. GPU upload and kernel launch -----
+    SVMCRecord*     d_records;
     unsigned short* d_vol_labels;
-    VoxelAccum* d_accums;
-    unsigned char* d_gvol;
-    
-    cudaMalloc(&d_quads, quads.size() * sizeof(SNQuad));
+    unsigned char*  d_gvol;
+    unsigned int*   d_newvol;
+
+    cudaMalloc(&d_records,    vol_length * sizeof(SVMCRecord));
     cudaMalloc(&d_vol_labels, vol_length * sizeof(unsigned short));
-    cudaMalloc(&d_accums, vol_length * sizeof(VoxelAccum));
-    cudaMalloc(&d_gvol, vol_length * 2 * sizeof(unsigned int)); 
-    
-    // Initialize
-    cudaMemcpy(d_quads, quads.data(), quads.size() * sizeof(SNQuad), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_gvol,       vol_length * 8);
+    cudaMalloc(&d_newvol,     vol_length * 2 * sizeof(unsigned int));
+
+    cudaMemcpy(d_records,    h_records,    vol_length * sizeof(SVMCRecord),     cudaMemcpyHostToDevice);
     cudaMemcpy(d_vol_labels, h_vol_labels, vol_length * sizeof(unsigned short), cudaMemcpyHostToDevice);
-    cudaMemset(d_accums, 0, vol_length * sizeof(VoxelAccum));
-    
-    // Initialize accums with sentinel values for min/max
-    std::vector<VoxelAccum> init_accums(vol_length);
-    for (long i = 0; i < vol_length; i++) {
-        init_accums[i].cx = 0.0f;
-        init_accums[i].cy = 0.0f;
-        init_accums[i].cz = 0.0f;
-        init_accums[i].nx = 0.0f;
-        init_accums[i].ny = 0.0f;
-        init_accums[i].nz = 0.0f;
-        init_accums[i].total_weight = 0.0f;
-        init_accums[i].lower = 0xFFFF;
-        init_accums[i].upper = 0;
-        init_accums[i].quad_count = 0;
-    }
-    cudaMemcpy(d_accums, init_accums.data(), vol_length * sizeof(VoxelAccum), cudaMemcpyHostToDevice);
-    
-    // Run kernels
-    int threads = 256;
-    int quad_blocks = ((int)quads.size() + threads - 1) / threads;
-    int voxel_blocks = (vol_length + threads - 1) / threads;
-    
-    MCX_FPRINTF(cfg->flog, "[SN] Assigning quads to voxels...\n");
-    assign_quads_to_voxels_kernel<<<quad_blocks, threads>>>( d_quads, (int)quads.size(), d_accums, d_vol_labels,dims[0], dims[1], dims[2], voxelsize[0], voxelsize[1], voxelsize[2]);
-    cudaDeviceSynchronize();
 
-    
+    int threads      = 256;
+    int voxel_blocks = (int)((vol_length + threads - 1) / threads);
 
-    // Debug: count voxel types
-    VoxelAccum* h_accums = new VoxelAccum[vol_length];
-    cudaMemcpy(h_accums, d_accums, vol_length * sizeof(VoxelAccum), cudaMemcpyDeviceToHost);
-
-    debug_function(cfg, SNDBG_AFTER_ASSIGN, nullptr, h_vol_labels, dims, voxelsize, h_accums, vol_length, nullptr);
-
-
-    int surface_count = 0, homogeneous_count = 0;
-    for (long i = 0; i < vol_length; i++) {
-        if (h_accums[i].total_weight < 1e-12f || h_accums[i].quad_count == 0) {
-            homogeneous_count++;
-        } else {
-            surface_count++;
-        }
-    }
-    MCX_FPRINTF(cfg->flog, "[SN Debug] Surface voxels: %d, Homogeneous: %d (total: %ld)\n", surface_count, homogeneous_count, vol_length);
-
-// Check for different label pairs in assigned voxels
-int pair_counts[5] = {0, 0, 0, 0, 0}; // 0-1, 0-2, 0-3, 1-2, other
-for (long i = 0; i < vol_length; i++) {
-    if (h_accums[i].quad_count > 0) {
-        int lo = h_accums[i].lower;
-        int hi = h_accums[i].upper;
-        if (lo == 0 && hi == 1) pair_counts[0]++;
-        else if (lo == 0 && hi == 2) pair_counts[1]++;
-        else if (lo == 0 && hi == 3) pair_counts[2]++;
-        else if (lo == 1 && hi == 2) pair_counts[3]++;
-        else pair_counts[4]++;
-    }
-}
-MCX_FPRINTF(cfg->flog, "[SN Debug] Assigned voxel pairs: 0-1=%d, 0-2=%d, 0-3=%d, 1-2=%d, other=%d\n",
-    pair_counts[0], pair_counts[1], pair_counts[2], pair_counts[3], pair_counts[4]);
-
-    // Also check first few surface voxels' upper values
-    int shows = 0;
-    for (long i = 0; i < vol_length && shows < 5; i++) {
-        if (h_accums[i].quad_count > 0) {
-            MCX_FPRINTF(cfg->flog, "[SN Debug] Surface voxel %ld: lower=%d upper=%d weight=%.3f\n",
-                        i, h_accums[i].lower, h_accums[i].upper, h_accums[i].total_weight);
-            shows++;
-        }
-    }
-
-    
-    // How many quads assigned per voxel?
-    int voxels_with_1_quad = 0;
-    int voxels_with_2_quads = 0;
-    int voxels_with_3plus_quads = 0;
-
-    for (long i = 0; i < vol_length; i++) {
-        if (h_accums[i].quad_count == 1) voxels_with_1_quad++;
-        else if (h_accums[i].quad_count == 2) voxels_with_2_quads++;
-        else if (h_accums[i].quad_count >= 3) voxels_with_3plus_quads++;
-    }
-
-    MCX_FPRINTF(cfg->flog, "[SN Debug] Voxels by quad count: 1=%d, 2=%d, 3+=%d\n", voxels_with_1_quad, voxels_with_2_quads, voxels_with_3plus_quads);
-
-    // Check if centroids are within expected voxel bounds
-    int out_of_bounds = 0;
-    for (long i = 0; i < vol_length; i++) {
-        if (h_accums[i].quad_count > 0) {
-            float inv_w = 1.0f / h_accums[i].total_weight;
-            float cx = h_accums[i].cx * inv_w;
-            float cy = h_accums[i].cy * inv_w;
-            float cz = h_accums[i].cz * inv_w;
-            
-            int vx = i % dims[0];
-            int vy = (i / dims[0]) % dims[1];
-            int vz = i / (dims[0] * dims[1]);
-            
-            // Check if centroid is near this voxel
-            if (cx < vx - 1 || cx > vx + 2 || 
-                cy < vy - 1 || cy > vy + 2 || 
-                cz < vz - 1 || cz > vz + 2) {
-                out_of_bounds++;
-            }
-        }
-    }
-    MCX_FPRINTF(cfg->flog, "[SN Debug] Centroids far from assigned voxel: %d\n", out_of_bounds);
-
-
-    delete[] h_accums;
-    
     MCX_FPRINTF(cfg->flog, "[SN] Finalizing SVMC format...\n");
-    finalize_svmc_kernel<<<voxel_blocks, threads>>>( d_gvol, d_accums, d_vol_labels, vol_length, dims[0], dims[1], dims[2], voxelsize[0], voxelsize[1], voxelsize[2], cfg->medianum);
+    finalize_svmc_kernel<<<voxel_blocks, threads>>>(
+        d_gvol, d_records, d_vol_labels, vol_length,
+        dims[0], dims[1], dims[2],
+        voxelsize[0], voxelsize[1], voxelsize[2],
+        cfg->medianum);
     cudaDeviceSynchronize();
 
-    
-    // Copy back and repack to MCX format
+    MCX_FPRINTF(cfg->flog, "[SN] Repacking to MCX interleaved format...\n");
+    repack_kernel<<<voxel_blocks, threads>>>(d_newvol, d_gvol, vol_length);
+    cudaDeviceSynchronize();
+
+    // ----- 5. Copy result back to host -----
     unsigned int* h_newvol = (unsigned int*)malloc(vol_length * 2 * sizeof(unsigned int));
-    unsigned char* h_gvol = (unsigned char*)malloc(vol_length * 8);
-    if (!h_gvol) {
-        MCX_FPRINTF(stderr, "[SN Error] Failed to allocate h_gvol\n");
-        // cleanup and return
-    }
-    cudaMemcpy(h_gvol, d_gvol, vol_length * 8, cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_newvol, d_gvol, vol_length * 2 * sizeof(unsigned int), cudaMemcpyDeviceToHost);
-    
-    debug_function(cfg, SNDBG_AFTER_FINALIZE, nullptr, h_vol_labels, dims, voxelsize,
-               nullptr, vol_length, (const unsigned int*)h_newvol);
-
-
-    // After finalize kernel, check for anomalies
-int anomalies = 0;
-int label_mismatch = 0;
-for (long i = 0; i < vol_length; i++) {
-    unsigned char* first = &h_gvol[i * 4];
-    unsigned char lower = first[3];
-    unsigned char upper = first[2];
-    unsigned short vol_label = h_vol_labels[i];
-    
-    // Check: lower should match volume label for homogeneous, 
-    // or be one of the boundary labels for surface voxels
-    if (upper > 0 && upper != lower) {
-        // Surface voxel - lower should equal vol_label
-        if (lower != vol_label) {
-            if (label_mismatch < 10) {
-                int x = i % dims[0];
-                int y = (i / dims[0]) % dims[1];
-                int z = i / (dims[0] * dims[1]);
-                MCX_FPRINTF(cfg->flog, "[SN Anomaly] Voxel %ld [%d,%d,%d]: lower=%d but vol_label=%d (upper=%d)\n",
-                    i, x, y, z, lower, vol_label, upper);
-            }
-            label_mismatch++;
-        }
-    }
-    
-    // Check for unexpected high values
-    if (upper > 3 || lower > 3) {
-        anomalies++;
-    }
-}
-MCX_FPRINTF(cfg->flog, "[SN Debug] Label mismatches: %d, Anomalies (label>3): %d\n", 
-    label_mismatch, anomalies);
-
-
-    int sn_surface[4] = {0}, sn_interior[4] = {0};
-for (long i = 0; i < vol_length; i++) {
-    unsigned char* first = &h_gvol[i * 4];
-    unsigned char lower = first[3];
-    unsigned char upper = first[2];
-    
-    if (lower < 4) {
-        if (upper > 0 && upper != lower) {
-            sn_surface[lower]++;
-        } else {
-            sn_interior[lower]++;
-        }
-    }
-}
-MCX_FPRINTF(cfg->flog, "[SN Stats] Surface voxels by label: L0=%d L1=%d L2=%d L3=%d\n",
-    sn_surface[0], sn_surface[1], sn_surface[2], sn_surface[3]);
-MCX_FPRINTF(cfg->flog, "[SN Stats] Interior voxels by label: L0=%d L1=%d L2=%d L3=%d\n",
-    sn_interior[0], sn_interior[1], sn_interior[2], sn_interior[3]);
-    
-    // Debug: check actual bytes in surface voxels
-    int shown = 0;
-    for (long i = 0; i < vol_length && shown < 5; i++) {
-        unsigned char* v = &h_gvol[i * 8];
-        // Check if it's a surface voxel (upper != 0 and upper != lower)
-        if (v[6] > 0 && v[6] != v[7]) {
-            MCX_FPRINTF(cfg->flog, "[SN Debug] Voxel %ld raw bytes: [%d,%d,%d,%d,%d,%d,%d,%d]\n",
-                        i, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
-            MCX_FPRINTF(cfg->flog, "           nz=%d ny=%d nx=%d cz=%d cy=%d cx=%d upper=%d lower=%d\n",
-                        v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
-            shown++;
-        }
-    }
-
-    // Also check a known homogeneous interior voxel (center of volume)
-    long center_idx = 32 + 32*64 + 32*64*64;  // Assuming 64^3 volume
-    unsigned char* vc = &h_gvol[center_idx * 8];
-    MCX_FPRINTF(cfg->flog, "[SN Debug] Center voxel %ld raw: [%d,%d,%d,%d,%d,%d,%d,%d]\n",
-                center_idx, vc[0], vc[1], vc[2], vc[3], vc[4], vc[5], vc[6], vc[7]);
-
-    cudaError_t err = cudaMemcpy(h_gvol, d_gvol, vol_length * 8, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-        MCX_FPRINTF(stderr, "[SN Error] cudaMemcpy failed: %s\n", cudaGetErrorString(err));
-    }
+    cudaMemcpy(h_newvol, d_newvol, vol_length * 2 * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 
     MCX_FPRINTF(cfg->flog, "Surface Nets complete: %d ms\n", GetTimeMillis() - tic);
-    
-    // After repack loop, dump the PACKED format (same as MC)
-    FILE* fp_packed = fopen("dump_svmc_packed.bin", "wb");
-    if (fp_packed) {
-        fwrite(h_newvol, sizeof(unsigned int), vol_length * 2, fp_packed);
-        fclose(fp_packed);
-        MCX_FPRINTF(cfg->flog, "[SN] Wrote packed volume to dump_svmc_packed.bin\n");
+
+    FILE* fp = fopen("dump_svmc_sn.bin", "wb");
+    if (fp) {
+        fwrite(h_newvol, sizeof(unsigned int), vol_length * 2, fp);
+        fclose(fp);
+        MCX_FPRINTF(cfg->flog, "[SN] Wrote packed volume -> dump_svmc_sn.bin\n");
     }
 
-    // Read back and verify
-    FILE* fp_verify = fopen("dump_svmc_packed.bin", "rb");
-    if (fp_verify) {
-        unsigned int verify_val;
-        fseek(fp_verify, 59036 * 4, SEEK_SET);
-        fread(&verify_val, sizeof(unsigned int), 1, fp_verify);
-        fclose(fp_verify);
-        MCX_FPRINTF(cfg->flog, "[SN Debug] File readback voxel 59036 = 0x%08X\n", verify_val);
-    }
-
-    // DEBUG: Verify repack worked correctly
-    long test_idx = 59036;  // First surface voxel from earlier debug
-    unsigned char* check = (unsigned char*)h_newvol;
-    MCX_FPRINTF(cfg->flog, "[SN Debug] After repack - surface voxel %ld:\n", test_idx);
-    MCX_FPRINTF(cfg->flog, "  First uint bytes [0,1,2,3]: [%d,%d,%d,%d] (cy,cx,upper,lower)\n",
-        check[test_idx * 4 + 0], check[test_idx * 4 + 1], 
-        check[test_idx * 4 + 2], check[test_idx * 4 + 3]);
-    MCX_FPRINTF(cfg->flog, "  Second uint bytes [0,1,2,3]: [%d,%d,%d,%d] (nz,ny,nx,cz)\n",
-        check[(test_idx + vol_length) * 4 + 0], check[(test_idx + vol_length) * 4 + 1],
-        check[(test_idx + vol_length) * 4 + 2], check[(test_idx + vol_length) * 4 + 3]);
-
-    // Check center (homogeneous) voxel
-    test_idx = 133152;
-    MCX_FPRINTF(cfg->flog, "[SN Debug] After repack - center voxel %ld:\n", test_idx);
-    MCX_FPRINTF(cfg->flog, "  First uint bytes [0,1,2,3]: [%d,%d,%d,%d] (cy,cx,upper,lower)\n",
-        check[test_idx * 4 + 0], check[test_idx * 4 + 1],
-        check[test_idx * 4 + 2], check[test_idx * 4 + 3]);
-    // Write raw 8-byte SVMC volume for debugging
-    FILE* fp_svmc = fopen("dump_svmc_surfacenets.bin", "wb");
-    if (fp_svmc) {
-        fwrite(h_gvol, 1, vol_length * 8, fp_svmc);
-        fclose(fp_svmc);
-        MCX_FPRINTF(cfg->flog, "[SN] Wrote SVMC 8-byte volume to dump_svmc_surfacenets.bin\n");
-    }
-    // Cleanup
-    free(h_gvol);
-    cudaFree(d_quads);
+    // ----- 6. Cleanup -----
+    cudaFree(d_records);
     cudaFree(d_vol_labels);
-    cudaFree(d_accums);
     cudaFree(d_gvol);
+    cudaFree(d_newvol);
+    delete[] h_records;
     delete[] h_vol_labels;
     free(cfg->vol);
-    
-    cfg->vol = h_newvol;
+
+    cfg->vol       = h_newvol;
     cfg->mediabyte = MEDIA_2LABEL_SPLIT;
-}
 
-// ==========================================================
-// Device Helper Functions
-// ==========================================================
-
-__device__ __forceinline__ int voxel_idx_3d_to_1d(int x, int y, int z, int dimx, int dimy) {
-    return x + y * dimx + z * dimx * dimy;
-}
-
-__device__ __forceinline__ float3 compute_triangle_normal(float3 A, float3 B, float3 C) {
-    float3 AB = make_float3(B.x - A.x, B.y - A.y, B.z - A.z);
-    float3 AC = make_float3(C.x - A.x, C.y - A.y, C.z - A.z);
-    return make_float3( AB.y * AC.z - AB.z * AC.y, AB.z * AC.x - AB.x * AC.z, AB.x * AC.y - AB.y * AC.x);
-}
-
-__device__ __forceinline__ float triangle_area(float3 n) {
-    return 0.5f * sqrtf(n.x*n.x + n.y*n.y + n.z*n.z);
-}
-
-__device__ __forceinline__ float3 normalize_vec(float3 v) {
-    float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-    if (len > 1e-12f) {
-        return make_float3(v.x/len, v.y/len, v.z/len);
-    }
-    return make_float3(0.0f, 0.0f, 0.0f);
-}
-
-// Separating Axis Theorem for triangle-AABB intersection
-__device__ bool triangle_aabb_intersect( float3 v0, float3 v1, float3 v2, float3 box_min, float3 box_max
-) {
-    // Translate so box is centered at origin
-    float3 c = make_float3( (box_min.x + box_max.x) * 0.5f, (box_min.y + box_max.y) * 0.5f, (box_min.z + box_max.z) * 0.5f);
-    float3 e = make_float3(
-        (box_max.x - box_min.x) * 0.5f,
-        (box_max.y - box_min.y) * 0.5f,
-        (box_max.z - box_min.z) * 0.5f
-    );
-    
-    v0 = make_float3(v0.x - c.x, v0.y - c.y, v0.z - c.z);
-    v1 = make_float3(v1.x - c.x, v1.y - c.y, v1.z - c.z);
-    v2 = make_float3(v2.x - c.x, v2.y - c.y, v2.z - c.z);
-    
-    // Test AABB axes
-    float minX = fminf(fminf(v0.x, v1.x), v2.x);
-    float maxX = fmaxf(fmaxf(v0.x, v1.x), v2.x);
-    if (minX > e.x || maxX < -e.x) return false;
-    
-    float minY = fminf(fminf(v0.y, v1.y), v2.y);
-    float maxY = fmaxf(fmaxf(v0.y, v1.y), v2.y);
-    if (minY > e.y || maxY < -e.y) return false;
-    
-    float minZ = fminf(fminf(v0.z, v1.z), v2.z);
-    float maxZ = fmaxf(fmaxf(v0.z, v1.z), v2.z);
-    if (minZ > e.z || maxZ < -e.z) return false;
-    
-    // Test triangle normal
-    float3 n = compute_triangle_normal(v0, v1, v2);
-    float d = v0.x*n.x + v0.y*n.y + v0.z*n.z;
-    float r = e.x*fabsf(n.x) + e.y*fabsf(n.y) + e.z*fabsf(n.z);
-    if (fabsf(d) > r) return false;
-    
-    return true;  
-}
-
-// ==========================================================
-// Kernel 1: Direct Quad-to-Voxel Assignment
-// ==========================================================
-__global__ void assign_quads_to_voxels_kernel(
-    const SNQuad* quads, int num_quads, VoxelAccum* accums,
-    const unsigned short* vol_labels,
-    int dimx, int dimy, int dimz,
-    float vsx, float vsy, float vsz
-) {
-    int qid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (qid >= num_quads) return;
-    
-    SNQuad q = quads[qid];
-    if (q.labels[0] == q.labels[1] || q.labels[0] == 0xFFFF) return;
-    
-    float3 A = make_float3(q.corners[0], q.corners[1], q.corners[2]);
-    float3 B = make_float3(q.corners[3], q.corners[4], q.corners[5]);
-    float3 C = make_float3(q.corners[6], q.corners[7], q.corners[8]);
-    float3 D = make_float3(q.corners[9], q.corners[10], q.corners[11]);
-    
-    float3 n1 = compute_triangle_normal(A, B, C);
-    float3 n2 = compute_triangle_normal(A, C, D);
-    float area = triangle_area(n1) + triangle_area(n2);
-    if (area < 1e-12f) return;
-    
-    float3 normal = normalize_vec(make_float3(n1.x + n2.x, n1.y + n2.y, n1.z + n2.z));
-    
-    // OVERSAMPLE: Create sample points - 4 per triangle = 8 per quad
-    float3 samples[8];
-    int num_samples = 0;
-    
-    // Triangle 1: A-B-C
-    float3 c1 = make_float3( (A.x + B.x + C.x) / 3.0f, (A.y + B.y + C.y) / 3.0f, (A.z + B.z + C.z) / 3.0f);
-    samples[num_samples++] = c1;
-    samples[num_samples++] = make_float3( (c1.x + A.x) * 0.5f, (c1.y + A.y) * 0.5f, (c1.z + A.z) * 0.5f);
-    samples[num_samples++] = make_float3( (c1.x + B.x) * 0.5f, (c1.y + B.y) * 0.5f, (c1.z + B.z) * 0.5f);
-    samples[num_samples++] = make_float3( (c1.x + C.x) * 0.5f, (c1.y + C.y) * 0.5f, (c1.z + C.z) * 0.5f);
-
-    
-    // Triangle 2: A-C-D
-    float3 c2 = make_float3( (A.x + C.x + D.x) / 3.0f, (A.y + C.y + D.y) / 3.0f, (A.z + C.z + D.z) / 3.0f);
-    samples[num_samples++] = c2;
-    samples[num_samples++] = make_float3( (c2.x + A.x) * 0.5f, (c2.y + A.y) * 0.5f, (c2.z + A.z) * 0.5f);
-    samples[num_samples++] = make_float3( (c2.x + C.x) * 0.5f, (c2.y + C.y) * 0.5f, (c2.z + C.z) * 0.5f);
-    samples[num_samples++] = make_float3( (c2.x + D.x) * 0.5f, (c2.y + D.y) * 0.5f, (c2.z + D.z) * 0.5f);
-    
-    // Split area equally among samples
-    float sample_area = area / num_samples;
-    
-    // For each sample point, find its voxel and assign
-    for (int i = 0; i < num_samples; i++) {
-        float3 sample_grid = make_float3(
-            samples[i].x / vsx,
-            samples[i].y / vsy,
-            samples[i].z / vsz
-        );
-        
-        // Determine which voxel this sample is in
-        int sx = (int)floorf(sample_grid.x);
-        int sy = (int)floorf(sample_grid.y);
-        int sz = (int)floorf(sample_grid.z);
-        
-        // Clamp to bounds
-        sx = max(0, min(sx, dimx - 1));
-        sy = max(0, min(sy, dimy - 1));
-        sz = max(0, min(sz, dimz - 1));
-        
-        int idx = sx + sy * dimx + sz * dimx * dimy;
-        
-        // Only assign if voxel has one of the interface labels
-        unsigned short voxel_label = vol_labels[idx];
-        if (voxel_label == q.labels[0] || voxel_label == q.labels[1]) {
-            // Use SAMPLE position, not centroid
-            atomicAdd(&accums[idx].cx, samples[i].x * sample_area);
-            atomicAdd(&accums[idx].cy, samples[i].y * sample_area);
-            atomicAdd(&accums[idx].cz, samples[i].z * sample_area);
-            atomicAdd(&accums[idx].nx, normal.x * sample_area);
-            atomicAdd(&accums[idx].ny, normal.y * sample_area);
-            atomicAdd(&accums[idx].nz, normal.z * sample_area);
-            atomicAdd(&accums[idx].total_weight, sample_area);
-            atomicAdd(&accums[idx].quad_count, 1);
-            atomicMin(&accums[idx].lower, (unsigned int)q.labels[0]);
-            atomicMax(&accums[idx].upper, (unsigned int)q.labels[1]);
-        }
-    }
-}
-// ==========================================================
-// Kernel 2: Finalize Voxels to SVMC Format
-// ==========================================================
-
-__global__ void finalize_svmc_kernel(
-    unsigned char* gvol,  // Now interleaved: first vol_length*4 bytes, then second vol_length*4 bytes
-    const VoxelAccum* accums,
-    const unsigned short* vol_labels,
-    long vol_length,
-    int dimx, int dimy, int dimz,
-    float vsx, float vsy, float vsz,
-    int nMedia
-) {
-    long idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vol_length) return;
-    
-    // Interleaved format pointers (like MC does)
-    unsigned char* first_uint = &gvol[idx * 4];              // First half
-    unsigned char* second_uint = &gvol[(idx + vol_length) * 4];  // Second half
-    
-    const VoxelAccum* A = &accums[idx];
-    
-    int vx = idx % dimx;
-    int vy = (idx / dimx) % dimy;
-    int vz = idx / (dimx * dimy);
-    
-    if (A->total_weight < 1e-12f || A->quad_count == 0) {
-        // Homogeneous voxel
-        unsigned short lab = vol_labels[idx];
-        if (lab >= nMedia) lab = 0;
-        
-        first_uint[0] = 0;                    // cy
-        first_uint[1] = 0;                    // cx
-        first_uint[2] = 0;                    // upper
-        first_uint[3] = (unsigned char)lab;   // lower
-        
-        second_uint[0] = 0;  // nz
-        second_uint[1] = 0;  // ny
-        second_uint[2] = 0;  // nx
-        second_uint[3] = 0;  // cz
-        return;
-    }
-    
-    // Compute final centroid and normal
-    float inv_w = 1.0f / A->total_weight;
-    float3 centroid_world = make_float3(
-        A->cx * inv_w,
-        A->cy * inv_w,
-        A->cz * inv_w
-    );
-    float3 normal = normalize_vec(make_float3(A->nx, A->ny, A->nz));
-    
-    // Get labels
-    unsigned short lower = (A->lower == 0xFFFF) ? 0 : (unsigned short)A->lower;
-    unsigned short upper = (A->upper == 0) ? 0 : (unsigned short)A->upper;
-    
-    if (lower >= nMedia) lower = 0;
-    if (upper >= nMedia) upper = lower;
-    if (lower > upper) {
-        unsigned short tmp = lower;
-        lower = upper;
-        upper = tmp;
-    }
-    
-    // Convert centroid to voxel-local coordinates [0, 1]
-    float3 centroid_grid = make_float3(
-        centroid_world.x / vsx,
-        centroid_world.y / vsy,
-        centroid_world.z / vsz
-    );
-    float3 centroid_local = make_float3(
-        centroid_grid.x - (float)vx,
-        centroid_grid.y - (float)vy,
-        centroid_grid.z - (float)vz
-    );
-    
-    centroid_local.x = fminf(fmaxf(centroid_local.x, 0.0f), 1.0f);
-    centroid_local.y = fminf(fmaxf(centroid_local.y, 0.0f), 1.0f);
-    centroid_local.z = fminf(fmaxf(centroid_local.z, 0.0f), 1.0f);
-    
-    // Orient normal
-    float offset = 0.1f * fminf(fminf(vsx, vsy), vsz);
-    int tx = (int)floorf((centroid_world.x + offset * normal.x) / vsx);
-    int ty = (int)floorf((centroid_world.y + offset * normal.y) / vsy);
-    int tz = (int)floorf((centroid_world.z + offset * normal.z) / vsz);
-    int ax = (int)floorf((centroid_world.x - offset * normal.x) / vsx);
-    int ay = (int)floorf((centroid_world.y - offset * normal.y) / vsy);
-    int az = (int)floorf((centroid_world.z - offset * normal.z) / vsz);
-    
-    unsigned short toward_label = 0, away_label = 0;
-    if (tx >= 0 && tx < dimx && ty >= 0 && ty < dimy && tz >= 0 && tz < dimz)
-        toward_label = vol_labels[voxel_idx_3d_to_1d(tx, ty, tz, dimx, dimy)];
-    if (ax >= 0 && ax < dimx && ay >= 0 && ay < dimy && az >= 0 && az < dimz)
-        away_label = vol_labels[voxel_idx_3d_to_1d(ax, ay, az, dimx, dimy)];
-    
-    if (away_label == upper && toward_label == lower) {
-        normal.x = -normal.x;
-        normal.y = -normal.y;
-        normal.z = -normal.z;
-    }
-    
-    // Encode to bytes
-    unsigned char cx = (unsigned char)(centroid_local.x * 255.0f);
-    unsigned char cy = (unsigned char)(centroid_local.y * 255.0f);
-    unsigned char cz = (unsigned char)(centroid_local.z * 255.0f);
-    unsigned char nx = (unsigned char)((normal.x + 1.0f) * 127.5f);
-    unsigned char ny = (unsigned char)((normal.y + 1.0f) * 127.5f);
-    unsigned char nz = (unsigned char)((normal.z + 1.0f) * 127.5f);
-    
-    // Write interleaved format (same as MC)
-    first_uint[0] = cy;
-    first_uint[1] = cx;
-    first_uint[2] = (unsigned char)(upper & 0xFF);
-    first_uint[3] = (unsigned char)(lower & 0xFF);
-    
-    second_uint[0] = nz;
-    second_uint[1] = ny;
-    second_uint[2] = nx;
-    second_uint[3] = cz;
-}
-
-// ==========================================================
-// Fixed Quad Extraction with Per-Edge Boundary Conditions
-// 
-// Key fix: The original code applied uniform boundary checks to all edges,
-// but each edge type only needs checks on its PERPENDICULAR dimensions.
-// This was causing systematic gaps in the mesh.
-// ==========================================================
-
-std::vector<SNQuad> extract_quads_with_tracking(MMCellMap* cellmap, const unsigned short* vol_labels, int dims[3], float voxelsize[3]) {
-    std::vector<SNQuad> quads;
-    if (!cellmap) return quads;
-    
-    quads.reserve((long)dims[0] * dims[1] * dims[2]);
-    
-    // Canonical edges
-    const MMCellFlag::Edge canon_edges[3] = {
-        MMCellFlag::LeftBottomEdge,   // e=0: quad in XZ plane, cells differ in Y
-        MMCellFlag::BackBottomEdge,   // e=1: quad in YZ plane, cells differ in X
-        MMCellFlag::LeftBackEdge      // e=2: quad in XY plane, cells differ in Z
-    };
-    
-    // For each edge type, which dimensions need ci >= 1 (to have -1 neighbor for quad)
-    const int perp_dims[3][2] = {
-        {0, 2},  // Edge 0
-        {1, 2},  // Edge 1
-        {0, 1}   // Edge 2
-    };
-    
-    // Direction of label difference for each edge
-    const int edge_offsets[3][3] = {
-        {0, 1, 0},  // e=0: +Y
-        {1, 0, 0},  // e=1: +X
-        {0, 0, 1}   // e=2: +Z
-    };
-    
-    auto get_label = [&](int x, int y, int z) -> unsigned short {
-        if (x < 0 || x >= dims[0] || y < 0 || y >= dims[1] || z < 0 || z >= dims[2])
-            return 0xFFFF;
-        return vol_labels[z * dims[0] * dims[1] + y * dims[0] + x];
-    };
-    
-    for (int v = 0; v < cellmap->numVertices(); v++) {
-        int ci[3];
-        cellmap->getVertexCellIndex(v, ci);
-        
-        for (int e = 0; e < 3; e++) {
-            // Per-edge boundary check: only check perpendicular dimensions
-            int d1 = perp_dims[e][0];
-            int d2 = perp_dims[e][1];
-            if (ci[d1] < 1 || ci[d2] < 1) continue;
-            
-            // Check upper bound on the edge-parallel axis
-            int axis = (e == 0) ? 1 : (e == 1) ? 0 : 2;
-            if (ci[axis] > dims[axis]) continue;
-            
-            SNQuad q;
-            unsigned short labs[2];
-            if (!cellmap->getEdgeQuad(v, canon_edges[e], q.corners, labs)) continue;
-            
-            // Convert from padded to original coordinates
-            int vox1[3] = {ci[0] - 1, ci[1] - 1, ci[2] - 1};
-            int vox2[3] = {
-                vox1[0] + edge_offsets[e][0],
-                vox1[1] + edge_offsets[e][1],
-                vox1[2] + edge_offsets[e][2]
-            };
-
-            q.owner[0] = vox1[0];
-            q.owner[1] = vox1[1];
-            q.owner[2] = vox1[2];
-            
-            unsigned short label1 = get_label(vox1[0], vox1[1], vox1[2]);
-            unsigned short label2 = get_label(vox2[0], vox2[1], vox2[2]);
-            
-            // Skip boundary quads (one or both voxels in padding)
-            if (label1 == 0xFFFF || label2 == 0xFFFF) continue;
-            
-            // Skip if same label (no material boundary)
-            if (label1 == label2) continue;
-            
-            // Valid material boundary quad
-            q.labels[0] = std::min(label1, label2);
-            q.labels[1] = std::max(label1, label2);
-            
-            int* lo_vox = (label1 < label2) ? vox1 : vox2;
-            int* hi_vox = (label1 < label2) ? vox2 : vox1;
-            for (int i = 0; i < 3; i++) {
-                q.voxel1[i] = lo_vox[i];
-                q.voxel2[i] = hi_vox[i];
-            }
-            
-            // Convert corners from padded to original coordinates
-            for (int c = 0; c < 4; c++) {
-                q.corners[c*3 + 0] -= voxelsize[0];
-                q.corners[c*3 + 1] -= voxelsize[1];
-                q.corners[c*3 + 2] -= voxelsize[2];
-            }
-
-            // Verify voxel labels match
-unsigned short check1 = get_label(q.voxel1[0], q.voxel1[1], q.voxel1[2]);
-unsigned short check2 = get_label(q.voxel2[0], q.voxel2[1], q.voxel2[2]);
-if (check1 != q.labels[0] || check2 != q.labels[1]) {
-    static int mismatch_count = 0;
-    if (mismatch_count++ < 10) {
-        printf("EXTRACTION MISMATCH: labels=[%d,%d] but voxel1[%d,%d,%d] has %d, voxel2[%d,%d,%d] has %d\n",
-            q.labels[0], q.labels[1],
-            q.voxel1[0], q.voxel1[1], q.voxel1[2], check1,
-            q.voxel2[0], q.voxel2[1], q.voxel2[2], check2);
-    }
-}
-            
-            q.edge_axis = e;
-            quads.push_back(q);
-        }
-    }
-    
-    return quads;
-}
-// void dump_quads_obj(const std::vector<SNQuad>& quads, const char* filename) {
-//     FILE* fobj = fopen(filename, "w");
-//     if (!fobj) return;
-    
-//     for (size_t i = 0; i < quads.size(); ++i) {
-//         const SNQuad& q = quads[i];
-//         fprintf(fobj,
-//             "v %.6f %.6f %.6f\n"
-//             "v %.6f %.6f %.6f\n"
-//             "v %.6f %.6f %.6f\n"
-//             "v %.6f %.6f %.6f\n",
-//             q.corners[0],  q.corners[1],  q.corners[2],
-//             q.corners[3],  q.corners[4],  q.corners[5],
-//             q.corners[6],  q.corners[7],  q.corners[8],
-//             q.corners[9],  q.corners[10], q.corners[11]);
-//         size_t base = i * 4;
-//         fprintf(fobj, "f %zu %zu %zu\n", base + 1, base + 2, base + 3);
-//         fprintf(fobj, "f %zu %zu %zu\n", base + 1, base + 3, base + 4);
-//     }
-//     fclose(fobj);
-//     printf("[SN] Dumped %zu quads to %s\n", quads.size(), filename);
-// }
-
-// Diagnostic function to dump extracted quads as OBJ
-// Add this to your mcx_svmc_sn.cu to visualize raw quad extraction
-
-void dump_quads_obj(const std::vector<SNQuad>& quads, const char* filename) {
-    FILE* fp = fopen(filename, "w");
-    if (!fp) {
-        fprintf(stderr, "Failed to open %s for writing\n", filename);
-        return;
-    }
-    
-    fprintf(fp, "# Surface Nets quads diagnostic\n");
-    fprintf(fp, "# Total quads: %zu\n", quads.size());
-    
-    // Write all vertices first
-    int vertex_count = 0;
-    for (size_t i = 0; i < quads.size(); i++) {
-        const SNQuad& q = quads[i];
-        // 4 corners per quad
-        for (int c = 0; c < 4; c++) {
-            fprintf(fp, "v %f %f %f\n", 
-                q.corners[c*3 + 0],
-                q.corners[c*3 + 1], 
-                q.corners[c*3 + 2]);
-        }
-        vertex_count += 4;
-    }
-    
-    fprintf(fp, "# Vertices: %d\n", vertex_count);
-    
-    // Write faces (1-indexed in OBJ format)
-    for (size_t i = 0; i < quads.size(); i++) {
-        int base = i * 4 + 1;  // OBJ is 1-indexed
-        // Quad as two triangles: ABC and ACD
-        fprintf(fp, "f %d %d %d\n", base, base+1, base+2);
-        fprintf(fp, "f %d %d %d\n", base, base+2, base+3);
-    }
-    
-    fclose(fp);
-    printf("Wrote %zu quads (%d vertices) to %s\n", quads.size(), vertex_count, filename);
-}
-
-// Also add per-label-pair statistics:
-void analyze_quads(const std::vector<SNQuad>& quads) {
-    std::map<std::pair<int,int>, int> label_pair_counts;
-    std::map<int, int> edge_axis_counts;
-    
-    float min_area = 1e30f, max_area = 0.0f, total_area = 0.0f;
-    int degenerate_count = 0;
-    
-    for (const auto& q : quads) {
-        // Count by label pair
-        label_pair_counts[{q.labels[0], q.labels[1]}]++;
-        
-        // Count by edge axis
-        edge_axis_counts[q.edge_axis]++;
-        
-        // Calculate quad area
-        float3 A = {q.corners[0], q.corners[1], q.corners[2]};
-        float3 B = {q.corners[3], q.corners[4], q.corners[5]};
-        float3 C = {q.corners[6], q.corners[7], q.corners[8]};
-        float3 D = {q.corners[9], q.corners[10], q.corners[11]};
-        
-        // Cross products for triangle areas
-        float3 AB = {B.x-A.x, B.y-A.y, B.z-A.z};
-        float3 AC = {C.x-A.x, C.y-A.y, C.z-A.z};
-        float3 AD = {D.x-A.x, D.y-A.y, D.z-A.z};
-        
-        float3 n1 = {AB.y*AC.z - AB.z*AC.y, AB.z*AC.x - AB.x*AC.z, AB.x*AC.y - AB.y*AC.x};
-        float3 n2 = {AC.y*AD.z - AC.z*AD.y, AC.z*AD.x - AC.x*AD.z, AC.x*AD.y - AC.y*AD.x};
-        
-        float area = 0.5f * (sqrtf(n1.x*n1.x + n1.y*n1.y + n1.z*n1.z) + sqrtf(n2.x*n2.x + n2.y*n2.y + n2.z*n2.z));
-        
-        if (area < 1e-10f) {
-            degenerate_count++;
+    // Post-processing: source position fixup + detector mask (identical to MC)
+    if (cfg->srctype <= MCX_SRC_CONE || cfg->srctype == MCX_SRC_ARCSINE ||
+            cfg->srctype == MCX_SRC_ZGAUSSIAN) {
+        if (cfg->srcpos.x < 0.f || cfg->srcpos.y < 0.f || cfg->srcpos.z < 0.f ||
+                cfg->srcpos.x >= cfg->dim.x || cfg->srcpos.y >= cfg->dim.y ||
+                cfg->srcpos.z >= cfg->dim.z) {
+            *((uint*)&cfg->srcparam2.z) = 0;
+            *((uint*)&cfg->srcparam2.w) = 0;
         } else {
-            min_area = fminf(min_area, area);
-            max_area = fmaxf(max_area, area);
-            total_area += area;
+            uint idx1dorig =
+                ((int)floorf(cfg->srcpos.z)) * (cfg->dim.y * cfg->dim.x) +
+                ((int)floorf(cfg->srcpos.y)) * cfg->dim.x +
+                ((int)floorf(cfg->srcpos.x));
+            *((uint*)&cfg->srcparam2.z) = idx1dorig;
+            *((uint*)&cfg->srcparam2.w) = (cfg->vol[idx1dorig] & MED_MASK);
         }
-    }
-    
-    printf("\n=== Quad Analysis ===\n");
-    printf("Total quads: %zu\n", quads.size());
-    printf("Degenerate (zero area): %d\n", degenerate_count);
-    printf("Area stats: min=%.6f max=%.6f avg=%.6f total=%.2f\n",
-           min_area, max_area, total_area/quads.size(), total_area);
-    
-    printf("\nBy label pair:\n");
-    for (const auto& kv : label_pair_counts) {
-        printf("  [%d,%d]: %d quads\n", kv.first.first, kv.first.second, kv.second);
-    }
-    
-    printf("\nBy edge axis:\n");
-    printf("  X-edge (e=0, Y-diff): %d\n", edge_axis_counts[0]);
-    printf("  Y-edge (e=1, X-diff): %d\n", edge_axis_counts[1]);
-    printf("  Z-edge (e=2, Z-diff): %d\n", edge_axis_counts[2]);
-}
 
-// Diagnostic for checking voxel coverage
-void analyze_voxel_assignment(const std::vector<SNQuad>& quads,  const unsigned short* vol_labels, int dims[3]) {
-    // Track which voxels receive quads
-    std::set<int> assigned_voxels;
-    std::set<int> boundary_voxels;
-    
-    auto idx3d = [&](int x, int y, int z) { return x + y*dims[0] + z*dims[0]*dims[1]; };
-    
-    // Find all boundary voxels (have neighbor with different label)
-    for (int z = 0; z < dims[2]; z++) {
-        for (int y = 0; y < dims[1]; y++) {
-            for (int x = 0; x < dims[0]; x++) {
-                unsigned short lab = vol_labels[idx3d(x,y,z)];
-                bool is_boundary = false;
-                
-                // Check 6 neighbors
-                if (x > 0 && vol_labels[idx3d(x-1,y,z)] != lab) is_boundary = true;
-                if (x < dims[0]-1 && vol_labels[idx3d(x+1,y,z)] != lab) is_boundary = true;
-                if (y > 0 && vol_labels[idx3d(x,y-1,z)] != lab) is_boundary = true;
-                if (y < dims[1]-1 && vol_labels[idx3d(x,y+1,z)] != lab) is_boundary = true;
-                if (z > 0 && vol_labels[idx3d(x,y,z-1)] != lab) is_boundary = true;
-                if (z < dims[2]-1 && vol_labels[idx3d(x,y,z+1)] != lab) is_boundary = true;
-                
-                if (is_boundary) {
-                    boundary_voxels.insert(idx3d(x,y,z));
+        if (cfg->extrasrclen) {
+            for (unsigned int i = 0; i < cfg->extrasrclen; i++) {
+                float sx = cfg->srcdata[i].srcpos.x;
+                float sy = cfg->srcdata[i].srcpos.y;
+                float sz = cfg->srcdata[i].srcpos.z;
+                if (sx<0.f||sy<0.f||sz<0.f||
+                        sx>=cfg->dim.x||sy>=cfg->dim.y||sz>=cfg->dim.z) {
+                    *((uint*)&cfg->srcdata[i].srcparam2.z) = 0;
+                    *((uint*)&cfg->srcdata[i].srcparam2.w) = 0;
+                } else {
+                    uint idx1dorig =
+                        ((int)floorf(sz))*(cfg->dim.y*cfg->dim.x) +
+                        ((int)floorf(sy))*cfg->dim.x +
+                        ((int)floorf(sx));
+                    *((uint*)&cfg->srcdata[i].srcparam2.z) = idx1dorig;
+                    *((uint*)&cfg->srcdata[i].srcparam2.w) =
+                        (cfg->vol[idx1dorig] & MED_MASK);
                 }
             }
         }
     }
-    
-    // Check which voxels would receive quads (using HIGHER label strategy)
-    for (const auto& q : quads) {
-        unsigned short l1 = vol_labels[idx3d(q.voxel1[0], q.voxel1[1], q.voxel1[2])];
-        unsigned short l2 = vol_labels[idx3d(q.voxel2[0], q.voxel2[1], q.voxel2[2])];
-        
-        int vx, vy, vz;
-        if (l1 >= l2) {
-            vx = q.voxel1[0]; vy = q.voxel1[1]; vz = q.voxel1[2];
-        } else {
-            vx = q.voxel2[0]; vy = q.voxel2[1]; vz = q.voxel2[2];
+
+    mcx_maskdet(cfg);
+}
+
+
+// =============================================================================
+// CPU: build_svmc_records
+//
+// One pass over all SN vertices. Each vertex lives in padded cell ci and
+// carries the surface geometry for that cube. We store its record at the
+// UPPER-CORNER index  idx = ci[0] + ci[1]*dims[0] + ci[2]*dims[0]*dims[1]
+// to match MC's storage convention.
+//
+// Centroid:
+//   corners[0..2] from getEdgeQuadPositions is always the current vertex's
+//   world position in padded space (getEdgeQuadVtxIndices always puts the
+//   current cell's vertex at index 0).
+//   world_pos[d] = voxelsize[d] * (ci[d] + vertexOffset[d])
+//   centroid_local[d] = world_pos[d]/voxelsize[d] - ci[d]
+//                     = vertexOffset[d]   in [0, 1]
+//   Equivalently: corners[d]/voxelsize[d] - ci[d]
+//   (The -1 padding offset implicit in corners[] cancels with ci[d]-1+1.)
+//
+// Normal:
+//   Analytical proof for all 12 edge types shows that the natural cross
+//   product (B-A)x(C-A) always points from the lower-indexed label toward
+//   the higher-indexed label. After sorting qlo < qhi the natural normal
+//   points lower->upper. We negate to match MC's convention (toward lower).
+//   No probe is used: probes are structurally unreliable when the vertex sits
+//   near the center of its cell (offset ~0.5) because no single probe offset
+//   can both cross the near boundary and stay within the correct far cell.
+//
+// Storage filter: NONE.
+//   Every active vertex writes regardless of what label occupies the
+//   upper-corner cell. MC likewise writes to every cube that has a surface
+//   crossing, regardless of the cube's own label.
+// =============================================================================
+
+static void build_svmc_records(
+    MMCellMap*            cellmap,
+    const unsigned short* vol_labels,
+    int                   dims[3],
+    float                 voxelsize[3],
+    SVMCRecord*           records)   // pre-zeroed, dims[0]*dims[1]*dims[2] entries
+{
+    if (!cellmap) return;
+
+    const MMCellFlag::Edge all_edges[12] = {
+        MMCellFlag::LeftBottomEdge,  MMCellFlag::RightBottomEdge,
+        MMCellFlag::BackBottomEdge,  MMCellFlag::FrontBottomEdge,
+        MMCellFlag::LeftTopEdge,     MMCellFlag::RightTopEdge,
+        MMCellFlag::BackTopEdge,     MMCellFlag::FrontTopEdge,
+        MMCellFlag::LeftBackEdge,    MMCellFlag::RightBackEdge,
+        MMCellFlag::LeftFrontEdge,   MMCellFlag::RightFrontEdge
+    };
+
+    const int nv = cellmap->numVertices();
+
+    for (int v = 0; v < nv; v++) {
+        int ci[3];
+        cellmap->getVertexCellIndex(v, ci);
+
+        // Interior range: ci[i] in [1, dims[i]-1] gives storage indices in
+        // [1, dims[i]-1] matching MC's range of (bx+1) in [1, dimx-1].
+        // ci[i]==0 is a padding cell. ci[i]==dims[i] would be out-of-bounds.
+        if (ci[0] < 1 || ci[0] >= dims[0] ||
+            ci[1] < 1 || ci[1] >= dims[1] ||
+            ci[2] < 1 || ci[2] >= dims[2]) continue;
+
+        // Upper-corner storage index -- matches MC exactly.
+        long idx = (long)ci[0] +
+                   (long)ci[1] * dims[0] +
+                   (long)ci[2] * dims[0] * dims[1];
+
+        float total_nx = 0.f, total_ny = 0.f, total_nz = 0.f;
+        float total_w  = 0.f;
+        float vcx = 0.f, vcy = 0.f, vcz = 0.f;
+        bool  got_position = false;
+        uint32_t lo_best   = 0xFFFFFFFFu;
+        uint32_t hi_best   = 0;
+        float    best_area = -1.f;
+
+        for (int e = 0; e < 12; e++) {
+            float          corners[12];
+            unsigned short labels[2];
+            if (!cellmap->getEdgeQuad(v, all_edges[e], corners, labels))
+                continue;
+
+            // Skip padding-label or same-material quads
+            if (labels[0] == labels[1] ||
+                labels[0] == 0xFFFF   ||
+                labels[1] == 0xFFFF) continue;
+
+            // Centroid from first valid quad.
+            // corners[0..2] = world_pos = voxelsize*(ci + vertexOffset)
+            // centroid_local = corners/voxelsize - ci = vertexOffset in [0,1]
+            if (!got_position) {
+                vcx = corners[0] / voxelsize[0] - (float)ci[0];
+                vcy = corners[1] / voxelsize[1] - (float)ci[1];
+                vcz = corners[2] / voxelsize[2] - (float)ci[2];
+                got_position = true;
+            }
+
+            // Split quad ABCD -> triangles ABC + ACD
+            float ax=corners[0], ay=corners[1], az=corners[2];
+            float bx=corners[3], by=corners[4], bz=corners[5];
+            float ccx=corners[6],ccy=corners[7],ccz=corners[8];
+            float dx=corners[9], dy=corners[10],dz=corners[11];
+
+            float n1x=(by-ay)*(ccz-az)-(bz-az)*(ccy-ay);
+            float n1y=(bz-az)*(ccx-ax)-(bx-ax)*(ccz-az);
+            float n1z=(bx-ax)*(ccy-ay)-(by-ay)*(ccx-ax);
+
+            float n2x=(ccy-ay)*(dz-az)-(ccz-az)*(dy-ay);
+            float n2y=(ccz-az)*(dx-ax)-(ccx-ax)*(dz-az);
+            float n2z=(ccx-ax)*(dy-ay)-(ccy-ay)*(dx-ax);
+
+            float a1   = 0.5f * sqrtf(n1x*n1x + n1y*n1y + n1z*n1z);
+            float a2   = 0.5f * sqrtf(n2x*n2x + n2y*n2y + n2z*n2z);
+            float area = a1 + a2;
+            if (area < 1e-12f) continue;
+
+            // Unit normal from combined cross products (area-weighted by magnitude)
+            float snx=n1x+n2x, sny=n1y+n2y, snz=n1z+n2z;
+            float slen = sqrtf(snx*snx + sny*sny + snz*snz);
+            if (slen < 1e-12f) continue;
+            snx /= slen; sny /= slen; snz /= slen;
+
+            total_nx += snx * area;
+            total_ny += sny * area;
+            total_nz += snz * area;
+            total_w  += area;
+
+            // Track dominant label pair by largest quad area
+            uint32_t qlo = (labels[0] < labels[1]) ? labels[0] : labels[1];
+            uint32_t qhi = (labels[0] < labels[1]) ? labels[1] : labels[0];
+            if (area > best_area) {
+                best_area = area;
+                lo_best   = qlo;
+                hi_best   = qhi;
+            }
         }
-        
-        if (vx >= 0 && vx < dims[0] && vy >= 0 && vy < dims[1] && vz >= 0 && vz < dims[2]) {
-            assigned_voxels.insert(idx3d(vx, vy, vz));
-        }
-    }
-    
-    // Find boundary voxels without any quad assignment
-    std::vector<int> missing;
-    for (int idx : boundary_voxels) {
-        if (assigned_voxels.find(idx) == assigned_voxels.end()) {
-            missing.push_back(idx);
-        }
-    }
-    
-    printf("\n=== Voxel Assignment Analysis ===\n");
-    printf("Total boundary voxels: %zu\n", boundary_voxels.size());
-    printf("Voxels with quad assignments: %zu\n", assigned_voxels.size());
-    printf("Boundary voxels missing coverage: %zu (%.1f%%)\n", 
-           missing.size(), 100.0 * missing.size() / boundary_voxels.size());
-    
-    if (!missing.empty() && missing.size() <= 20) {
-        printf("Missing voxel indices (first 20):\n");
-        for (size_t i = 0; i < std::min(missing.size(), (size_t)20); i++) {
-            int idx = missing[i];
-            int x = idx % dims[0];
-            int y = (idx / dims[0]) % dims[1];
-            int z = idx / (dims[0] * dims[1]);
-            printf("  [%d,%d,%d] label=%d\n", x, y, z, vol_labels[idx]);
-        }
+
+        if (total_w < 1e-12f || !got_position) continue;
+
+        // Negate to match MC convention: normal points toward lower-label material.
+        // The natural cross product points lower->upper (proven analytically for
+        // all 12 edge types). Negating gives upper->lower = toward-lower = MC.
+        total_nx = -total_nx;
+        total_ny = -total_ny;
+        total_nz = -total_nz;
+
+        SVMCRecord& r = records[idx];
+        r.cx    = vcx;
+        r.cy    = vcy;
+        r.cz    = vcz;
+        r.nx    = total_nx;
+        r.ny    = total_ny;
+        r.nz    = total_nz;
+        r.w     = total_w;
+        r.lower = lo_best;
+        r.upper = hi_best;
     }
 }
 
-static void debug_function(
-    Config* cfg,
-    SNDStage stage,
-    const std::vector<SNQuad>* quads,
+
+// =============================================================================
+// GPU Kernel 1: finalize_svmc_kernel
+//
+// One thread per voxel. Reads SVMCRecord, normalises the normal, encodes
+// centroid and normal to bytes, packs into 8-byte contiguous SVMC layout:
+//   byte[0]=nz  [1]=ny  [2]=nx  [3]=cz  [4]=cy  [5]=cx  [6]=upper  [7]=lower
+//
+// Storage convention reminder:
+//   idx decomposes as vx=ci[0], vy=ci[1], vz=ci[2] (upper corner).
+//   The cube spans (vx-1, vy-1, vz-1) to (vx, vy, vz) in original 0-indexed.
+//   r->cx/cy/cz are vertexOffset in [0,1], already the correct local coords.
+//
+// No probe for normal orientation -- build_svmc_records negated analytically.
+// =============================================================================
+
+__global__ void finalize_svmc_kernel(
+    unsigned char*        gvol,
+    const SVMCRecord*     records,
     const unsigned short* vol_labels,
-    const int dims[3],
-    const float voxelsize[3],
-    const VoxelAccum* h_accums,   // optional (only after assign)
-    long vol_length,
-    const unsigned int* packed2u32 // optional (only after finalize)
-) {
-#if MCX_SN_DEBUG
-    FILE* log = (cfg && cfg->flog) ? cfg->flog : stderr;
+    long   vol_length,
+    int    dimx, int dimy, int dimz,
+    float  vsx,  float vsy,  float vsz,
+    int    nMedia)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vol_length) return;
 
-    auto idx3d = [&](int x,int y,int z){ return x + y*dims[0] + z*dims[0]*dims[1]; };
+    unsigned char*    voxel = &gvol[idx * 8];
+    const SVMCRecord* r     = &records[idx];
 
-    if (stage == SNDBG_BEFORE_RELAX || stage == SNDBG_AFTER_RELAX) {
-        if (!quads) return;
-
-        const char* objname =
-            (stage == SNDBG_BEFORE_RELAX) ? "dump_SN_BEFORE_surfacenets.obj" : "dump_SN_AFTER_surfacenets.obj";
-
-        dump_quads_obj(*quads, objname);
-
-        analyze_quads(*quads);
-        analyze_voxel_assignment(*quads, vol_labels, (int*)dims);
-
-        // small sample print
-        fprintf(log, "[SNDBG] First 5 quads:\n");
-        for (int i = 0; i < (int)std::min<size_t>(5, quads->size()); i++) {
-            const auto& q = (*quads)[i];
-            fprintf(log,
-                "  q%d labels=[%u,%u] owner=[%d,%d,%d] v1=[%d,%d,%d] v2=[%d,%d,%d] axis=%d\n",
-                i, q.labels[0], q.labels[1],
-                q.owner[0], q.owner[1], q.owner[2],
-                q.voxel1[0], q.voxel1[1], q.voxel1[2],
-                q.voxel2[0], q.voxel2[1], q.voxel2[2],
-                q.edge_axis);
-        }
+    // ---- Homogeneous voxel ----
+    if (r->w < 1e-12f) {
+        unsigned short lab = vol_labels[idx];
+        if (lab >= (unsigned short)nMedia) lab = 0;
+        voxel[0]=0; voxel[1]=0; voxel[2]=0; voxel[3]=0;
+        voxel[4]=0; voxel[5]=0; voxel[6]=0;
+        voxel[7] = (unsigned char)lab;
         return;
     }
 
-    if (stage == SNDBG_AFTER_ASSIGN && h_accums && vol_length > 0) {
-        long surface = 0, homo = 0;
-        for (long i = 0; i < vol_length; i++) {
-            if (h_accums[i].quad_count > 0 && h_accums[i].total_weight > 1e-12f) surface++;
-            else homo++;
-        }
-        fprintf(log, "[SNDBG] After assign: surface=%ld homo=%ld total=%ld\n", surface, homo, vol_length);
-        return;
-    }
+    // ---- Normalise surface normal ----
+    float len = sqrtf(r->nx*r->nx + r->ny*r->ny + r->nz*r->nz);
+    float nx, ny, nz;
+    if (len > 1e-12f) { nx=r->nx/len; ny=r->ny/len; nz=r->nz/len; }
+    else              { nx=0.f;       ny=0.f;       nz=1.f;       }
 
-    if (stage == SNDBG_AFTER_FINALIZE && packed2u32 && vol_length > 0) {
-        // Write contiguous 8-byte-per-voxel file: [nz,ny,nx,cz, cy,cx,upper,lower]
-        std::vector<unsigned char> out8((size_t)vol_length * 8);
+    // ---- Labels (sorted lower < upper from build_svmc_records) ----
+    unsigned short lower = (unsigned short)(r->lower & 0xFFFF);
+    unsigned short upper = (unsigned short)(r->upper & 0xFFFF);
+    if (lower >= (unsigned short)nMedia) lower = 0;
+    if (upper >= (unsigned short)nMedia) upper = lower;
+    if (lower > upper) { unsigned short t=lower; lower=upper; upper=t; }
 
-        const unsigned char* first  = (const unsigned char*)packed2u32; // [cy,cx,upper,lower]
-        const unsigned char* second = first + (size_t)vol_length * 4;   // [nz,ny,nx,cz]
+    // ---- Centroid: vertexOffset already in [0,1], just clamp ----
+    float cx = fminf(fmaxf(r->cx, 0.f), 1.f);
+    float cy = fminf(fmaxf(r->cy, 0.f), 1.f);
+    float cz = fminf(fmaxf(r->cz, 0.f), 1.f);
 
-        for (long i = 0; i < vol_length; i++) {
-            // second then first
-            memcpy(&out8[i*8 + 0], &second[i*4], 4);
-            memcpy(&out8[i*8 + 4], &first[i*4], 4);
-        }
+    // ---- Encode to bytes (same encoding as MC split_voxel) ----
+    unsigned char ecx = (unsigned char)(cx * 255.f);
+    unsigned char ecy = (unsigned char)(cy * 255.f);
+    unsigned char ecz = (unsigned char)(cz * 255.f);
+    // Normal: [-1,1] -> [0,254]  (max 254 matches MC's min(...,254) clamp)
+    unsigned char enx = (unsigned char)fminf((nx + 1.f) * 127.5f, 254.f);
+    unsigned char eny = (unsigned char)fminf((ny + 1.f) * 127.5f, 254.f);
+    unsigned char enz = (unsigned char)fminf((nz + 1.f) * 127.5f, 254.f);
 
-        FILE* fp = fopen("dump_svmc_surfacenets.bin", "wb");
-        if (fp) {
-            fwrite(out8.data(), 1, out8.size(), fp);
-            fclose(fp);
-            fprintf(log, "[SNDBG] Wrote dump_svmc_surfacenets.bin (%zu bytes)\n", out8.size());
-        }
-        return;
-    }
-#else
-    (void)cfg; (void)stage; (void)quads; (void)vol_labels; (void)dims; (void)voxelsize;
-    (void)h_accums; (void)vol_length; (void)packed2u32;
-#endif
+    // SVMC 8-byte layout: [nz, ny, nx, cz, cy, cx, upper, lower]
+    voxel[0] = enz;
+    voxel[1] = eny;
+    voxel[2] = enx;
+    voxel[3] = ecz;
+    voxel[4] = ecy;
+    voxel[5] = ecx;
+    voxel[6] = (unsigned char)upper;
+    voxel[7] = (unsigned char)lower;
+}
+
+
+// =============================================================================
+// GPU Kernel 2: repack_kernel
+//
+// Contiguous 8-byte layout -> MCX interleaved format (identical to MC output).
+//
+// Input  (per voxel): [nz, ny, nx, cz, cy, cx, upper, lower]
+// Output first  half: [cy, cx, upper, lower]
+// Output second half: [nz, ny, nx, cz]
+// =============================================================================
+
+__global__ void repack_kernel(
+    unsigned int*        newvol,
+    const unsigned char* gvol,
+    long                 vol_length)
+{
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vol_length) return;
+
+    const unsigned char* src = &gvol[idx * 8];
+    unsigned char*       dst = (unsigned char*)newvol;
+
+    dst[idx * 4 + 0] = src[4];  // cy
+    dst[idx * 4 + 1] = src[5];  // cx
+    dst[idx * 4 + 2] = src[6];  // upper
+    dst[idx * 4 + 3] = src[7];  // lower
+
+    dst[(idx + vol_length) * 4 + 0] = src[0];  // nz
+    dst[(idx + vol_length) * 4 + 1] = src[1];  // ny
+    dst[(idx + vol_length) * 4 + 2] = src[2];  // nx
+    dst[(idx + vol_length) * 4 + 3] = src[3];  // cz
 }

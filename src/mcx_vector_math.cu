@@ -54,8 +54,16 @@ inline __host__ __device__ void operator +=(float3& a, const float3& b) {
  * @brief Subtracting two float3 vectors c=a+b
  */
 
-inline __host__ __device__ float3 operator -(const float3& a, const float3& b) {
+inline __host__ __device__ float3 operator- (const float3& a, const float3& b) {
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+__host__ __device__ __forceinline__ float3 normalize_vec(float3 v) {
+    float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+    if (len > 1e-12f) {
+        return make_float3(v.x/len, v.y/len, v.z/len);
+    }
+    return make_float3(0.0f, 0.0f, 0.0f);
 }
 
 
@@ -63,8 +71,12 @@ inline __host__ __device__ float3 operator -(const float3& a, const float3& b) {
  * @brief Negating a float3 vector c=-a
  */
 
-inline __host__ __device__ float3 operator -(const float3& a) {
+inline __host__ __device__ float3 operator- (const float3& a) {
     return make_float3(-a.x, -a.y, -a.z);
+}
+
+inline __host__ __device__ float3 operator- (const float& s, const float3& a) {
+    return make_float3(s - a.x, s - a.y, s - a.z);
 }
 
 /**
