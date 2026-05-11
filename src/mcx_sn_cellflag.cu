@@ -1,9 +1,9 @@
 // ==========================================================
-// File: MMCellFlag.cu
+// File: mcx_sn_cellflag.cu
 // GPU implementation of MMCellFlag methods
 // ==========================================================
 
-#include "MMCellFlag.cuh"
+#include "mcx_sn_cellflag.cuh"
 
 // Set components of the cell flag from 8 corner labels
 __host__ __device__ void MMCellFlag::set(const unsigned short cellLabels[8], int debugIdx) {

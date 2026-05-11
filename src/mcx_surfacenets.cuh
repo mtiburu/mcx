@@ -1,14 +1,14 @@
 // ==========================================================
-// File: MMSurfaceNet.cuh
+// File: mcx_surfacenets.cuh
 // GPU-friendly version of MMSurfaceNet (header only)
 // ==========================================================
 
-#ifndef MM_SURFACE_NET_CUH
-#define MM_SURFACE_NET_CUH
+#ifndef MCX_SURFACENETS_CUH
+#define MCX_SURFACENETS_CUH
 
 #include <cuda_runtime.h>
 
-// Forward declaration (will be defined in MMCellMap.cuh)
+// Forward declaration (will be defined in mcx_sn_cellmap.cuh)
 struct MMCellMap;
 
 // CUDA-friendly MMSurfaceNet
@@ -48,4 +48,4 @@ struct MMSurfaceNet {
     MMCellMap* m_cellMap;  // device/host pointer depending on context
 };
 
-#endif // MM_SURFACE_NET_CUH
+#endif // MCX_SURFACENETS_CUH

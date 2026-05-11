@@ -82,9 +82,9 @@ Output layout (matches mcx_svmc.cu exactly):
 
 *******************************************************************************/
 
-#include "MMCellMap.cuh"
-#include "MMSurfaceNet.cuh"
-#include "MMCellFlag.cuh"
+#include "mcx_sn_cellmap.cuh"
+#include "mcx_surfacenets.cuh"
+#include "mcx_sn_cellflag.cuh"
 #include "mcx_svmc.h"
 #include "mcx_tictoc.h"
 #include "mcx_const.h"

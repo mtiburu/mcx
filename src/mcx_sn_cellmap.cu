@@ -1,10 +1,10 @@
 // ==========================================================
-// File: MMCellMap.cu
+// File: mcx_sn_cellmap.cu
 // GPU implementation of MMCellMap methods
 // ==========================================================
 #include <cub/cub.cuh>
-#include "MMCellMap.cuh"
-#include "MMCellFlag.cuh"
+#include "mcx_sn_cellmap.cuh"
+#include "mcx_sn_cellflag.cuh"
 
 // =============================================================
 // Vertex enumeration via prefix scan (Bug 4 fix)

@@ -1,15 +1,15 @@
 // ==========================================================
-// File: MMCellMap.cuh
+// File: mcx_sn_cellmap.cuh
 // GPU-friendly version of MMCellMap (header only)
 // ==========================================================
 
-#ifndef MM_CELL_MAP_CUH
-#define MM_CELL_MAP_CUH
+#ifndef MCX_SN_CELLMAP_CUH
+#define MCX_SN_CELLMAP_CUH
 
 #include <new>
 #include <cuda_runtime.h>
-#include "MMSurfaceNet.cuh"
-#include "MMCellFlag.cuh"
+#include "mcx_surfacenets.cuh"
+#include "mcx_sn_cellflag.cuh"
 
 struct Cell {
     unsigned short label;
@@ -358,4 +358,4 @@ struct MMCellMap {
     __host__ __device__ Cell* getFaceNeighborCellAndIndex(int cellIndex[3], MMCellFlag::Face face, int nbrCellIndex[3]);
 };
 
-#endif // MM_CELL_MAP_CUH
+#endif // MCX_SN_CELLMAP_CUH

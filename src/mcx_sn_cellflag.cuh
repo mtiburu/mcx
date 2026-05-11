@@ -1,10 +1,10 @@
 // ==========================================================
-// File: MMCellFlag.cuh
+// File: mcx_sn_cellflag.cuh
 // GPU-friendly version of MMCellFlag (header only)
 // ==========================================================
 
-#ifndef MM_CELL_FLAG_CUH
-#define MM_CELL_FLAG_CUH
+#ifndef MCX_SN_CELLFLAG_CUH
+#define MCX_SN_CELLFLAG_CUH
 
 
 #include <cuda_runtime.h>
@@ -380,4 +380,4 @@ __device__ __host__ inline MMCellFlag::Face operator++ (MMCellFlag::Face& f, int
     return old;
 }
 
-#endif // MM_CELL_FLAG_CUH
+#endif // MCX_SN_CELLFLAG_CUH

@@ -1,10 +1,10 @@
 // ==========================================================
-// File: MMSurfaceNet.cu
+// File: mcx_surfacenets.cu
 // GPU implementation of MMSurfaceNet methods
 // ==========================================================
 
-#include "MMSurfaceNet.cuh"
-#include "MMCellMap.cuh"
+#include "mcx_surfacenets.cuh"
+#include "mcx_sn_cellmap.cuh"
 
 #include <set>
 #include <cstdio>
