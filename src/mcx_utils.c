@@ -3791,13 +3791,15 @@ void mcx_validatecfg(Config* cfg, float* detps, int dimdetps[2], int seedbyte) {
         if (status) {
             MCX_ERROR(-6, mcx_last_shapeerror());
         }
-        
+
         if (cfg->issvmc) {
             size_t vollen = cfg->dim.x * cfg->dim.y * cfg->dim.z;
             unsigned int* newvol = (unsigned int*)malloc(vollen * 2 * sizeof(unsigned int));
+
             if (!newvol) {
                 MCX_ERROR(-1, "Failed to allocate 8-byte SVMC volume");
             }
+
             // Copy the 4-byte label volume into the first half
             memcpy(newvol, cfg->vol, vollen * sizeof(unsigned int));
             // Zero the second half (for normal/centroid)
@@ -4174,14 +4176,14 @@ int mcx_svmc_bgvoxel(int vol) {
  */
 
 void  mcx_maskdet(Config* cfg) {
-    #ifndef MCX_CONTAINER
+#ifndef MCX_CONTAINER
 
     if (cfg->isdumpmask) {
         mcx_dumpmask(cfg);
     }
 
 
-    #endif
+#endif
     uint d, dx, dy, dz, idx1d, zi, yi, c, count;
     float x, y, z, ix, iy, iz, rx, ry, rz, d2, mind2, d2max;
     unsigned int* padvol;

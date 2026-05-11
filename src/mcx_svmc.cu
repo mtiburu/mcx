@@ -492,7 +492,7 @@ void mcx_svmc_preprocess(Config* cfg, GPUInfo* gpu) {
         cudaDeviceSynchronize();
 
         // *** ADD: Extract triangles (same grid as split_voxel)
-        extract_mc_triangles_kernel<<<grid, block>>>(gmask, d_triangles, d_tri_count, max_triangles);
+        extract_mc_triangles_kernel <<< grid, block>>>(gmask, d_triangles, d_tri_count, max_triangles);
         cudaDeviceSynchronize();
     }
 
@@ -505,19 +505,23 @@ void mcx_svmc_preprocess(Config* cfg, GPUInfo* gpu) {
         CUDA_ASSERT(cudaMemcpy(h_triangles, d_triangles, sizeof(MCTriangle) * h_tri_count, cudaMemcpyDeviceToHost));
 
         FILE* fobj = fopen("dump_mc_mesh.obj", "w");
+
         if (fobj) {
             for (unsigned int i = 0; i < h_tri_count; ++i) {
                 fprintf(fobj, "v %.6f %.6f %.6f\n", h_triangles[i].v[0], h_triangles[i].v[1], h_triangles[i].v[2]);
                 fprintf(fobj, "v %.6f %.6f %.6f\n", h_triangles[i].v[3], h_triangles[i].v[4], h_triangles[i].v[5]);
                 fprintf(fobj, "v %.6f %.6f %.6f\n", h_triangles[i].v[6], h_triangles[i].v[7], h_triangles[i].v[8]);
             }
+
             for (unsigned int i = 0; i < h_tri_count; ++i) {
                 unsigned int base = i * 3;
                 fprintf(fobj, "f %u %u %u\n", base + 1, base + 2, base + 3);
             }
+
             fclose(fobj);
             MCX_FPRINTF(cfg->flog, "[MC Debug] Dumped %u triangles -> dump_mc_mesh.obj\n", h_tri_count);
         }
+
         free(h_triangles);
     }
 
@@ -538,6 +542,7 @@ void mcx_svmc_preprocess(Config* cfg, GPUInfo* gpu) {
     printf("=== Searching for MC boundary voxels ===\n");
     unsigned char* raw = (unsigned char*)h_newvol;
     int found = 0;
+
     for (int z = 14; z <= 45 && found < 5; z++) {
         for (int y = 14; y <= 45 && found < 5; y++) {
             for (int x = 14; x <= 45 && found < 5; x++) {
@@ -545,6 +550,7 @@ void mcx_svmc_preprocess(Config* cfg, GPUInfo* gpu) {
                 unsigned char up = raw[idx * 4 + 2];
                 unsigned char low = raw[idx * 4 + 3];
                 unsigned char cz = raw[(idx + 262144) * 4 + 3];
+
                 // Boundary voxel: different labels AND has centroid data
                 if (up != low && (up > 0 || cz > 0)) {
                     printf("MC boundary at (%d,%d,%d): up=%d low=%d cz=%d\n", x, y, z, up, low, cz);
@@ -555,18 +561,26 @@ void mcx_svmc_preprocess(Config* cfg, GPUInfo* gpu) {
     }
 
     // Count boundary voxels
-printf("=== Counting boundary voxels ===\n");
-unsigned char* raw1 = (unsigned char*)h_newvol;
-int boundary_count = 0;
-int up_nonzero = 0;
-for (unsigned long long i = 0; i < vol_length; i++) {
-    unsigned char up = raw1[i * 4 + 2];
-    unsigned char low = raw1[i * 4 + 3];
-    if (up != low) boundary_count++;
-    if (up > 0) up_nonzero++;
-}
-printf("Boundary voxels (up != low): %d\n", boundary_count);
-printf("Voxels with up > 0: %d\n", up_nonzero);
+    printf("=== Counting boundary voxels ===\n");
+    unsigned char* raw1 = (unsigned char*)h_newvol;
+    int boundary_count = 0;
+    int up_nonzero = 0;
+
+    for (unsigned long long i = 0; i < vol_length; i++) {
+        unsigned char up = raw1[i * 4 + 2];
+        unsigned char low = raw1[i * 4 + 3];
+
+        if (up != low) {
+            boundary_count++;
+        }
+
+        if (up > 0) {
+            up_nonzero++;
+        }
+    }
+
+    printf("Boundary voxels (up != low): %d\n", boundary_count);
+    printf("Voxels with up > 0: %d\n", up_nonzero);
 
     // --- Debug dump MC SVMC voxels ---
     {
@@ -584,9 +598,9 @@ printf("Voxels with up > 0: %d\n", up_nonzero);
             unsigned char nx = h_contiguous[(idx + vol_length) * 4 + 2];
             unsigned char cz = h_contiguous[(idx + vol_length) * 4 + 3];
             printf("MC voxel (%d,%d,%d): nz=%d ny=%d nx=%d cz=%d cy=%d cx=%d up=%d low=%d\n",
-                vx, vy, vz, nz, ny, nx, cz, cy, cx, up, low);
+                   vx, vy, vz, nz, ny, nx, cz, cy, cx, up, low);
         };
-        
+
         printf("\n=== MC SVMC Final Voxel Values ===\n");
         dump_mc_voxel(32, 32, 32);  // Interior
         dump_mc_voxel(25, 25, 15);  // Boundary
@@ -604,7 +618,7 @@ printf("Voxels with up > 0: %d\n", up_nonzero);
         size_t bytes = (size_t)vol_length * 2 * sizeof(unsigned int); // 8 bytes per voxel
         size_t written = fwrite(h_newvol, 1, bytes, fsvmc);
         fclose(fsvmc);
-        MCX_FPRINTF(cfg->flog,"[Debug] Dumped final MCX-packed volume → %s (%.3f MB, %llu voxels)\n", svmcfile, bytes / (1024.0 * 1024.0), vol_length);
+        MCX_FPRINTF(cfg->flog, "[Debug] Dumped final MCX-packed volume → %s (%.3f MB, %llu voxels)\n", svmcfile, bytes / (1024.0 * 1024.0), vol_length);
 
         if (written != bytes) {
             MCX_FPRINTF(stderr, "[Debug] WARNING: incomplete write (%zu/%zu bytes)\n", written, bytes);
@@ -875,6 +889,7 @@ __global__ void split_voxel(float* scalar_field, unsigned char* vol_new, unsigne
             cube_index |= (1 << i);
         }
     }
+
     // __device__ unsigned int d_split_count = 0;
 
     // if the voxel does not need to be split, terminate
@@ -986,7 +1001,7 @@ __device__ unsigned int flatten_3d_to_1d(uint3 idx3d, uint3 dim) {
 // filename: output OBJ file
 // flog    : MCX log file (can be NULL)
 __global__ void extract_mc_triangles_kernel( float* scalar_field,  MCTriangle* triangles, unsigned int* triangle_count, unsigned int max_triangles
-) {
+                                           ) {
     uint3 cube_idx3d = blockIdx + make_uint3(1, 1, 1);
     uint3 vol_dim = gridDim + make_uint3(1, 1, 1);
 
@@ -995,12 +1010,15 @@ __global__ void extract_mc_triangles_kernel( float* scalar_field,  MCTriangle* t
 
     for (unsigned int i = 0; i < 8; ++i) {
         cube_values[i] = scalar_field[flatten_3d_to_1d(blockIdx + cube_vertices_local[i], vol_dim)];
+
         if (cube_values[i] < MCX_SVMC_ISOVALUE) {
             cube_index |= (1 << i);
         }
     }
 
-    if (edge_intersections[cube_index] == 0) return;
+    if (edge_intersections[cube_index] == 0) {
+        return;
+    }
 
     uint16_t edge_mask = edge_intersections[cube_index];
     float3 iso_verts[12];
@@ -1008,12 +1026,12 @@ __global__ void extract_mc_triangles_kernel( float* scalar_field,  MCTriangle* t
     for (unsigned int i = 0; i < 12; ++i) {
         if (edge_mask & (1 << i)) {
             iso_verts[i] = interpolate(
-                make_float3(cube_vertices_local[edge_vertices[i][0]]),
-                make_float3(cube_vertices_local[edge_vertices[i][1]]),
-                cube_values[edge_vertices[i][0]],
-                cube_values[edge_vertices[i][1]],
-                MCX_SVMC_ISOVALUE
-            );
+                               make_float3(cube_vertices_local[edge_vertices[i][0]]),
+                               make_float3(cube_vertices_local[edge_vertices[i][1]]),
+                               cube_values[edge_vertices[i][0]],
+                               cube_values[edge_vertices[i][1]],
+                               MCX_SVMC_ISOVALUE
+                           );
             // Offset to voxel world position
             iso_verts[i].x += (float)(cube_idx3d.x - 1);
             iso_verts[i].y += (float)(cube_idx3d.y - 1);
@@ -1023,16 +1041,19 @@ __global__ void extract_mc_triangles_kernel( float* scalar_field,  MCTriangle* t
 
     for (unsigned int i = 0; triangle_vertices[cube_index][i] != -1; i += 3) {
         unsigned int idx = atomicAdd(triangle_count, 1);
-        if (idx >= max_triangles) return;
+
+        if (idx >= max_triangles) {
+            return;
+        }
 
         triangles[idx].v[0] = iso_verts[triangle_vertices[cube_index][i]].x;
         triangles[idx].v[1] = iso_verts[triangle_vertices[cube_index][i]].y;
         triangles[idx].v[2] = iso_verts[triangle_vertices[cube_index][i]].z;
-        triangles[idx].v[3] = iso_verts[triangle_vertices[cube_index][i+1]].x;
-        triangles[idx].v[4] = iso_verts[triangle_vertices[cube_index][i+1]].y;
-        triangles[idx].v[5] = iso_verts[triangle_vertices[cube_index][i+1]].z;
-        triangles[idx].v[6] = iso_verts[triangle_vertices[cube_index][i+2]].x;
-        triangles[idx].v[7] = iso_verts[triangle_vertices[cube_index][i+2]].y;
-        triangles[idx].v[8] = iso_verts[triangle_vertices[cube_index][i+2]].z;
+        triangles[idx].v[3] = iso_verts[triangle_vertices[cube_index][i + 1]].x;
+        triangles[idx].v[4] = iso_verts[triangle_vertices[cube_index][i + 1]].y;
+        triangles[idx].v[5] = iso_verts[triangle_vertices[cube_index][i + 1]].z;
+        triangles[idx].v[6] = iso_verts[triangle_vertices[cube_index][i + 2]].x;
+        triangles[idx].v[7] = iso_verts[triangle_vertices[cube_index][i + 2]].y;
+        triangles[idx].v[8] = iso_verts[triangle_vertices[cube_index][i + 2]].z;
     }
 }

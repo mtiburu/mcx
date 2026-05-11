@@ -45,16 +45,11 @@ struct MMCellMap {
         return m_numVertices;
     }
     __host__ __device__ int numEdgeCrossings() const;
-    //__host__ __device__ MMCellFlag::VertexType vertexType(int vertexIndex) const;
     __host__ __device__ __forceinline__ MMCellFlag::VertexType vertexType(int vertexIndex) const {
         int cellIndex[3];
         getVertexCellIndex(vertexIndex, cellIndex);
         return cellVertexType(cellArrayIndex(cellIndex));
     }
-
-
-    // __host__ __device__ bool getEdgeQuad(int vertexIndex, MMCellFlag::Edge edge, float quadCorners[12], unsigned short quadLabels[2]);
-    // __host__ __device__ bool getEdgeQuad(int vertexIndex, MMCellFlag::Edge edge, int quadVtxIndices[4], unsigned short quadLabels[2]);
 
     __host__ __device__ inline bool getEdgeQuad(int vertexIndex, MMCellFlag::Edge edge, float quadCorners[12], unsigned short quadLabels[2]) {
         int cellIndex[3];
@@ -83,18 +78,30 @@ struct MMCellMap {
         return true;
     }
 
-    __host__ __device__ __forceinline__ void getVertexCellIndex(int vertexIndex, int cellIndex[3]) const {
-        Vertex* pVertex = &(m_vertices[vertexIndex]);
-        cellIndex[0] = pVertex->cellIndex[0];
-        cellIndex[1] = pVertex->cellIndex[1];
-        cellIndex[2] = pVertex->cellIndex[2];
-    }
     struct Vertex {
         int cellIndex[3];
     };
 
-    __host__ Cell* get_d_cells() const { return d_cells; }
-    __host__ Vertex* get_vertices() const { return m_vertices; }
+    __host__ __device__ __forceinline__ void getVertexCellIndex(int vertexIndex, int cellIndex[3]) const {
+#ifdef __CUDA_ARCH__
+        const Vertex* pVertex = &(d_vertices[vertexIndex]);
+#else
+        const Vertex* pVertex = &(m_vertices[vertexIndex]);
+#endif
+        cellIndex[0] = pVertex->cellIndex[0];
+        cellIndex[1] = pVertex->cellIndex[1];
+        cellIndex[2] = pVertex->cellIndex[2];
+    }
+
+    __host__ Cell* get_d_cells() const {
+        return d_cells;
+    }
+    __host__ Vertex* get_vertices() const {
+        return m_vertices;
+    }
+    __host__ Vertex* get_d_vertices() const {
+        return d_vertices;
+    }
     friend struct MMSurfaceNet;
 
   private:
@@ -107,6 +114,7 @@ struct MMCellMap {
     float m_voxelSize[3];
 
     Cell*   d_cells         = nullptr;
+    Vertex* d_vertices      = nullptr;   // device mirror of m_vertices (Bug 3 fix)
 
     // Cell definition
 
@@ -120,51 +128,40 @@ struct MMCellMap {
     // Internal helpers (to be implemented in .cu)
     __host__ __device__ void initCell(Cell* cell, unsigned short label);
     __host__ void setCellVertices();
-    
-
-    // __host__ __device__ Cell* getCell(int cellIndex[3]) const;
-    // __host__ __device__ Cell* getCell(int i, int j, int k) const;
-    // __host__ __device__ Cell* getCell(int cellArrayIndex) const;
-
     __host__ __device__ inline Cell* getCell(int cellArrayIndex) const {
-        //return &(m_cellArray[cellArrayIndex]);
-        #ifdef __CUDA_ARCH__
-        return &d_cells[cellArrayIndex];     // GPU path
-        #else
-            return &m_cellArray[cellArrayIndex]; // CPU path
-        #endif
+#ifdef __CUDA_ARCH__
+        return &d_cells[cellArrayIndex];
+#else
+        return &m_cellArray[cellArrayIndex];
+#endif
     }
     __host__ __device__ inline Cell* getCell(int i, int j, int k) const {
-        int idx = cellArrayIndex(i,j,k);
-        #ifdef __CUDA_ARCH__
-            return &d_cells[idx];
-        #else
-            return &m_cellArray[idx];
-        #endif
+        int idx = cellArrayIndex(i, j, k);
+#ifdef __CUDA_ARCH__
+        return &d_cells[idx];
+#else
+        return &m_cellArray[idx];
+#endif
     }
-
     __host__ __device__ inline Cell* getCell(int cellIndex[3]) const {
-        
         return getCell(cellArrayIndex(cellIndex));
     }
-    __host__ __device__ inline int cellArrayIndex(int cellIndex[3]) const{
-        return(cellArrayIndex(cellIndex[0], cellIndex[1], cellIndex[2]));
+    __host__ __device__ inline int cellArrayIndex(int cellIndex[3]) const {
+        return cellArrayIndex(cellIndex[0], cellIndex[1], cellIndex[2]);
     }
-    __host__ __device__ inline int cellArrayIndex(int i, int j, int k) const{
-        return (i + m_arraySize[0] * (j + m_arraySize[1] * k));
+    __host__ __device__ inline int cellArrayIndex(int i, int j, int k) const {
+        return i + m_arraySize[0] * (j + m_arraySize[1] * k);
     }
 
     __host__ __device__ void getCellLabels(Cell* cell, unsigned short labels[8]);
-    // __host__ __device__ bool isEdgeCrossing(int cellArrayIndex, MMCellFlag::Edge edge) const;
     __host__ __device__ inline bool isEdgeCrossing(int cellArrayIndex, MMCellFlag::Edge edge) const {
         Cell* pCell = getCell(cellArrayIndex);
         return pCell->flag.isEdgeCrossing(edge);
     }
-    __host__ __device__ inline MMCellFlag::VertexType cellVertexType(int cellArrayIndex) const{
+    __host__ __device__ inline MMCellFlag::VertexType cellVertexType(int cellArrayIndex) const {
         Cell*  pCell = getCell(cellArrayIndex);
-        return (pCell->flag.vertexType());
+        return pCell->flag.vertexType();
     }
-    // __host__ __device__ void getEdgeLabels(int cellIndex[3], MMCellFlag::Edge edge, unsigned short quadLabels[2]);
     __host__ __device__ void getEdgeLabels(int cellIndex[3], MMCellFlag::Edge edge, unsigned short quadLabels[2]) {
         Cell* pCell = getCell(cellIndex);
         Cell* pCellFirstLabel, *pCellSecondLabel;
@@ -239,7 +236,6 @@ struct MMCellMap {
         quadLabels[0] = pCellFirstLabel->label;
         quadLabels[1] = pCellSecondLabel->label;
     }
-    // __host__ __device__ void getEdgeQuadPositions(int cellIndex[3], MMCellFlag::Edge edge, float quadCorners[12]);
     __host__ __device__ inline void getEdgeQuadPositions(int cellIndex[3], MMCellFlag::Edge edge, float quadCorners[12]) {
         int vtxIndices[4];
         getEdgeQuadVtxIndices(cellIndex, edge, vtxIndices);
@@ -250,8 +246,6 @@ struct MMCellMap {
             getVertexPosition(ci, &(quadCorners[i * 3]));
         }
     }
-    // __host__ __device__ void getEdgeQuadVtxIndices(int cellIndex[3], MMCellFlag::Edge edge, int quadVtxIndices[4]);
-
     __host__ __device__ void getEdgeQuadVtxIndices(int cellIndex[3], MMCellFlag::Edge edge, int quadVtxIndices[4]) {
         Cell* pCell = getCell(cellIndex);
         int length = m_arraySize[0];
@@ -339,13 +333,11 @@ struct MMCellMap {
         }
     }
 
-    // Vertex access
-    // __host__ __device__ void getVertexPosition(int vertexIndex, float position[3]) const;
-    // __host__ __device__ void getVertexPosition(int i, int j, int k, float position[3]) const;
-    // __host__ __device__ void getVertexPosition(int cellIndex[3], float position[3]) const;
-    
+    /* Vertex position queries in padded-world coordinates (= cellIndex + vertexOffset, scaled by voxelSize). */
     __host__ __device__ __forceinline__ void getVertexPosition(int vertexIndex, float position[3]) const {
-        getVertexPosition(m_vertices[vertexIndex].cellIndex, position);
+        int ci[3];
+        getVertexCellIndex(vertexIndex, ci);
+        getVertexPosition(ci, position);
     }
     __host__ __device__ __forceinline__ void getVertexPosition(int i, int j, int k, float position[3]) const {
         Cell* pCell = getCell(i, j, k);

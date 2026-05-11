@@ -59,10 +59,12 @@ inline __host__ __device__ float3 operator- (const float3& a, const float3& b) {
 }
 
 __host__ __device__ __forceinline__ float3 normalize_vec(float3 v) {
-    float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+    float len = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+
     if (len > 1e-12f) {
-        return make_float3(v.x/len, v.y/len, v.z/len);
+        return make_float3(v.x / len, v.y / len, v.z / len);
     }
+
     return make_float3(0.0f, 0.0f, 0.0f);
 }
 

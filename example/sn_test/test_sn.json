@@ -1,0 +1,35 @@
+{
+    "Session": {
+        "ID": "sn_test",
+        "DoMismatch": 1,
+        "OutputType": "fluence",
+        "DoAutoThread": 1,
+        "RNGSeed": 209466425,
+        "Photons": 1000
+    },
+    "Forward": {
+        "T0": 0,
+        "T1": 5e-09,
+        "Dt": 5e-09
+    },
+    "Optode": {
+        "Source": {
+            "Pos": [30.0, 30.0, 0.0],
+            "Dir": [0.0, 0.0, 1.0]
+        }
+    },
+    "Domain": {
+        "OriginType": 1,
+        "LengthUnit": 1.0,
+        "Media": [
+            {"mua": 0,    "mus": 0, "g": 1.0, "n": 1.0},
+            {"mua": 0.01, "mus": 1, "g": 0.9, "n": 1.00},
+            {"mua": 0.02, "mus": 1, "g": 0.9, "n": 1.37},
+            {"mua": 0.03, "mus": 1, "g": 0.9, "n": 1.40},
+            {"mua": 0.04, "mus": 1, "g": 0.9, "n": 1.45}
+        ],
+        "MediaFormat": "byte",
+        "Dim": [60, 60, 60],
+        "VolumeFile": "test_sn_vol.bin"
+    }
+}

@@ -44,62 +44,76 @@ struct MMCellFlag {
     // Set components of the cell flag from 8 labels (implemented in .cu)
     __host__ __device__ void set(const unsigned short cellLabels[8], int debugIdx);
 
-    __host__ __device__ inline void set(unsigned short cellLabels[8])
-    {
+    __host__ __device__ inline void set(unsigned short cellLabels[8]) {
         // By default the cell has no vertex and no face or edge crossings
         m_bitFlag = 0;
 
         // Find edge crossings
         int numEdgeCrossings = 0;
+
         if (cellLabels[0] != cellLabels[3]) {
             m_bitFlag |= m_leftBottomEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[1] != cellLabels[2]) {
             m_bitFlag |= m_rightBottomEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[0] != cellLabels[1]) {
             m_bitFlag |= m_backBottomEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[2] != cellLabels[3]) {
             m_bitFlag |= m_frontBottomEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[4] != cellLabels[7]) {
             m_bitFlag |= m_leftTopEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[5] != cellLabels[6]) {
             m_bitFlag |= m_rightTopEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[4] != cellLabels[5]) {
             m_bitFlag |= m_backTopEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[6] != cellLabels[7]) {
             m_bitFlag |= m_frontTopEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[0] != cellLabels[4]) {
             m_bitFlag |= m_leftBackEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[1] != cellLabels[5]) {
             m_bitFlag |= m_rightBackEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[3] != cellLabels[7]) {
             m_bitFlag |= m_leftFrontEdgeCrossingBit;
             numEdgeCrossings++;
         }
+
         if (cellLabels[2] != cellLabels[6]) {
             m_bitFlag |= m_rightFrontEdgeCrossingBit;
             numEdgeCrossings++;
         }
-        if (numEdgeCrossings == 0) return;
+
+        if (numEdgeCrossings == 0) {
+            return;
+        }
 
         // Find face crossings
         unsigned int faceTypeBits;
@@ -115,26 +129,37 @@ struct MMCellFlag {
 
         faceTypeBits = faceCrossingTypeAsBits(cellLabels[0], cellLabels[1], cellLabels[2], cellLabels[3]);
         m_bitFlag |= (faceTypeBits << BottomFaceShift);
+        faceTypeBits = faceCrossingTypeAsBits(cellLabels[4], cellLabels[5], cellLabels[6], cellLabels[7]);
         m_bitFlag |= (faceTypeBits << TopFaceShift);
 
         // Determine vertex type
         int numFaceCrossings = 0;
         int numJunctionCrossings = 0;
+
         for (int fi = (int)LeftFace; fi <= (int)TopFace; ++fi) {
             Face face = (Face)fi;
             FaceCrossingType fct = faceCrossingType(face);
+
             if (fct != FaceCrossingType::NoFaceCrossing) {
                 numFaceCrossings++;
+
                 if (fct == FaceCrossingType::JunctionFaceCrossing) {
                     numJunctionCrossings++;
                 }
             }
         }
+
         if (numFaceCrossings != 0) {
             unsigned int vertexTypeBits = 0;
-            if (numJunctionCrossings < 1) vertexTypeBits = (unsigned int)VertexType::SurfaceVertex;
-            else if (numJunctionCrossings <= 2) vertexTypeBits = (unsigned int)VertexType::EdgeVertex;
-            else vertexTypeBits = (unsigned int)VertexType::CornerVertex;
+
+            if (numJunctionCrossings < 1) {
+                vertexTypeBits = (unsigned int)VertexType::SurfaceVertex;
+            } else if (numJunctionCrossings <= 2) {
+                vertexTypeBits = (unsigned int)VertexType::EdgeVertex;
+            } else {
+                vertexTypeBits = (unsigned int)VertexType::CornerVertex;
+            }
+
             m_bitFlag |= (vertexTypeBits << VertexTypeShift);
         }
     }
@@ -146,6 +171,7 @@ struct MMCellFlag {
 
     __host__ __device__ inline FaceCrossingType faceCrossingType(Face face) const {
         unsigned int faceTypeBits = 0;
+
         switch (face) {
             case LeftFace:
                 faceTypeBits = (m_bitFlag & m_leftFaceCrossingBits) >> LeftFaceShift;
@@ -171,78 +197,83 @@ struct MMCellFlag {
                 faceTypeBits = (m_bitFlag & m_topFaceCrossingBits) >> TopFaceShift;
                 break;
 
-            default:            
+            default:
                 faceTypeBits = 0;
 
         }
+
         switch (faceTypeBits) {
-            case 0: return(FaceCrossingType::NoFaceCrossing);
-            case 1: return(FaceCrossingType::SurfaceFaceCrossing);
-            case 2: return(FaceCrossingType::JunctionFaceCrossing);
-            default: return(FaceCrossingType::NoFaceCrossing);
+            case 0:
+                return (FaceCrossingType::NoFaceCrossing);
+
+            case 1:
+                return (FaceCrossingType::SurfaceFaceCrossing);
+
+            case 2:
+                return (FaceCrossingType::JunctionFaceCrossing);
+
+            default:
+                return (FaceCrossingType::NoFaceCrossing);
         }
     }
     __host__ __device__ inline bool isEdgeCrossing(Edge edge) const {
-    bool result = false;
+        bool result = false;
 
-    switch (edge) {
-        case LeftBottomEdge:
-            result = (m_bitFlag & m_leftBottomEdgeCrossingBit);
-            break;
+        switch (edge) {
+            case LeftBottomEdge:
+                result = (m_bitFlag & m_leftBottomEdgeCrossingBit);
+                break;
 
-        case RightBottomEdge:
-            result = (m_bitFlag & m_rightBottomEdgeCrossingBit);
-            break;
+            case RightBottomEdge:
+                result = (m_bitFlag & m_rightBottomEdgeCrossingBit);
+                break;
 
-        case BackBottomEdge:
-            result = (m_bitFlag & m_backBottomEdgeCrossingBit);
-            break;
+            case BackBottomEdge:
+                result = (m_bitFlag & m_backBottomEdgeCrossingBit);
+                break;
 
-        case FrontBottomEdge:
-            result = (m_bitFlag & m_frontBottomEdgeCrossingBit);
-            break;
+            case FrontBottomEdge:
+                result = (m_bitFlag & m_frontBottomEdgeCrossingBit);
+                break;
 
-        case LeftTopEdge:
-            result = (m_bitFlag & m_leftTopEdgeCrossingBit);
-            break;
+            case LeftTopEdge:
+                result = (m_bitFlag & m_leftTopEdgeCrossingBit);
+                break;
 
-        case RightTopEdge:
-            result = (m_bitFlag & m_rightTopEdgeCrossingBit);
-            break;
+            case RightTopEdge:
+                result = (m_bitFlag & m_rightTopEdgeCrossingBit);
+                break;
 
-        case BackTopEdge:
-            result = (m_bitFlag & m_backTopEdgeCrossingBit);
-            break;
+            case BackTopEdge:
+                result = (m_bitFlag & m_backTopEdgeCrossingBit);
+                break;
 
-        case FrontTopEdge:
-            result = (m_bitFlag & m_frontTopEdgeCrossingBit);
-            break;
+            case FrontTopEdge:
+                result = (m_bitFlag & m_frontTopEdgeCrossingBit);
+                break;
 
-        case LeftBackEdge:
-            result = (m_bitFlag & m_leftBackEdgeCrossingBit);
-            break;
+            case LeftBackEdge:
+                result = (m_bitFlag & m_leftBackEdgeCrossingBit);
+                break;
 
-        case RightBackEdge:
-            result = (m_bitFlag & m_rightBackEdgeCrossingBit);
-            break;
+            case RightBackEdge:
+                result = (m_bitFlag & m_rightBackEdgeCrossingBit);
+                break;
 
-        case LeftFrontEdge:
-            result = (m_bitFlag & m_leftFrontEdgeCrossingBit);
-            break;
+            case LeftFrontEdge:
+                result = (m_bitFlag & m_leftFrontEdgeCrossingBit);
+                break;
 
-        case RightFrontEdge:
-            result = (m_bitFlag & m_rightFrontEdgeCrossingBit);
-            break;
+            case RightFrontEdge:
+                result = (m_bitFlag & m_rightFrontEdgeCrossingBit);
+                break;
 
-        default:
-            return false;
+            default:
+                return false;
+        }
+
+        return result;
     }
-
-    // #ifndef __CUDA_ARCH__
-    //     MCX_FPRINTF(stderr,"[DEBUG][MMCellFlag::isEdgeCrossing] edge=%d → m_bitFlag=0x%08X → result=%d\n", (int)edge, m_bitFlag, result != 0);
-    // #endif
-    return result;
-}
 
   private:
     // Bit shifts
@@ -278,8 +309,7 @@ struct MMCellFlag {
     static constexpr unsigned int m_rightFrontEdgeCrossingBit = 1 << 25;
 
     // Helper for face crossing
-    __host__ __device__ inline unsigned int faceCrossingTypeAsBits( unsigned short c0, unsigned short c1, unsigned short c2, unsigned short c3)
-    {
+    __host__ __device__ inline unsigned int faceCrossingTypeAsBits( unsigned short c0, unsigned short c1, unsigned short c2, unsigned short c3) {
         int numUniqueTypes = 0;
         unsigned short uniqueTypes[4];
         uniqueTypes[numUniqueTypes++] = c0;

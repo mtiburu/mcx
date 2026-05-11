@@ -264,6 +264,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
             //mcx_svmc_preprocess(&cfg, gpuinfo);
             if (cfg.issvmc) {
                 printf("[MCXLAB Debug] issvmc=%d, use_surfacenets=%d\n", cfg.issvmc, cfg.use_surfacenets);
+
                 if (cfg.use_surfacenets) {
                     printf("[MCXLAB Debug] Calling mcx_svmc_preprocess_surfacenets()\n");
                     mcx_svmc_preprocess_surfacenets(&cfg, gpuinfo);
@@ -575,12 +576,13 @@ void mcx_set_field(const mxArray* root, const mxArray* item, int idx, Config* cf
     GET_ONE_FIELD(cfg, isrefint)
     GET_ONE_FIELD(cfg, isnormalized)
     //GET_ONE_FIELD(cfg, issvmc)
-    if (strcmp(name, "issvmc") == 0) {
+    else if (strcmp(name, "issvmc") == 0) {
         int mode = (int)(*mxGetPr(item));
         cfg->issvmc = (mode > 0);
         cfg->use_surfacenets = (mode == 2);
         printf("mcx.issvmc=%d; (use_surfacenets=%d)\n", mode, cfg->use_surfacenets);
     }
+
     GET_ONE_FIELD(cfg, isgpuinfo)
     GET_ONE_FIELD(cfg, issrcfrom0)
     GET_ONE_FIELD(cfg, autopilot)

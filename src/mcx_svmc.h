@@ -57,12 +57,12 @@ void mcx_svmc_preprocess_surfacenets(Config* cfg, GPUInfo* gpu);
 #ifdef __CUDACC__
 
 
-// Device helper functions
-__device__ float3 interpolate(float3 a, float3 b, float a_val, float b_val, float isovalue);
-__device__ unsigned int flatten_3d_to_1d(uint3 idx3d, uint3 dim);
+    // Device helper functions
+    __device__ float3 interpolate(float3 a, float3 b, float a_val, float b_val, float isovalue);
+    __device__ unsigned int flatten_3d_to_1d(uint3 idx3d, uint3 dim);
 
-// Kernels
-__global__ void split_voxel(float* scalar_field, unsigned char* vol_new, unsigned int label);
+    // Kernels
+    __global__ void split_voxel(float* scalar_field, unsigned char* vol_new, unsigned int label);
 
 #endif // __CUDACC__
 

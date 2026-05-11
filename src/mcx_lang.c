@@ -63,15 +63,15 @@ to equalize the lengths of each line.
 
 #define MSTR(...) #__VA_ARGS__
 
-const char *languagename[MAX_MCX_LANG] = {"zh_cn", "zh_tw", "ja_jp", "fr_ca", "es_mx", "de_de", "ko_kr", "hi_in", "pt_br", ""};
+const char* languagename[MAX_MCX_LANG] = {"zh_cn", "zh_tw", "ja_jp", "fr_ca", "es_mx", "de_de", "ko_kr", "hi_in", "pt_br", ""};
 
 const char* translations[MAX_MCX_LANG] = {
-MSTR(
-{
-    "_LANG_":  "简体中文",
-    "_LOCALE_":  "zh_CN",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_":  "简体中文",
+"_LOCALE_":  "zh_CN",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                           极限蒙卡 (MCX) -- CUDA                            #\n\
 #         作者版权 (c) 2009-2025 Qianqian Fang <q.fang at neu.edu>            #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -156,14 +156,14 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc":  "警告：这个版本的 MCX 不支持保存 partial path，请添加 -D SAVE_DETECTORS 编译参数并重新编译 MCX",
     "workload was unspecified for an active device":  "启用的显卡无指定的仿真负载配比",
     "you can not specify both interactive mode and config file":  "配置文件(-f)和交互模式(-i)不可以同时使用"
-}),
+    }),
 
-MSTR(
-{
-    "_LANG_": "繁體中文（台灣）",
-    "_LOCALE_": "zh_TW",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_": "繁體中文（台灣）",
+"_LOCALE_": "zh_TW",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                           極限蒙卡 (MCX) -- CUDA                            #\n\
 #          作者版權 (c) 2009-2025 Qianqian Fang <q.fang at neu.edu>           #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -248,14 +248,14 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc": "警告：此版本 MCX 不支援儲存 partial path，請使用 -D SAVE_DETECTORS 重新編譯",
     "workload was unspecified for an active device": "已啟用的裝置未設定工作負載比例",
     "you can not specify both interactive mode and config file": "不能同時指定互動模式(-i)與設定檔(-f)"
-}),
+    }),
 
-MSTR(
-{
-    "_LANG_": "日本語",
-    "_LOCALE_": "ja_JP",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_": "日本語",
+"_LOCALE_": "ja_JP",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                           極限モンテカルロ (MCX) -- CUDA                    #\n\
 #         著作権 (c) 2009-2025 Qianqian Fang <q.fang at neu.edu>              #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -342,14 +342,14 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc": "警告：このMCXバイナリでは部分経路の保存ができません。-D SAVE_DETECTORSを使用して再コンパイルしてください",
     "workload was unspecified for an active device": "アクティブなデバイスに対して作業負荷が指定されていません",
     "you can not specify both interactive mode and config file": "インタラクティブモード（-i）と設定ファイル（-f）は同時に使用できません"
-}),
+    }),
 
-MSTR(
-{
-    "_LANG_": "Français canadien",
-    "_LOCALE_": "fr_CA",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_": "Français canadien",
+"_LOCALE_": "fr_CA",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                      Monte Carlo Extrême (MCX) -- CUDA                      #\n\
 #     Droits d’auteur (c) 2009-2025 Qianqian Fang <q.fang at neu.edu>         #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -437,14 +437,14 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc": "AVERTISSEMENT : ce binaire de MCX ne peut pas enregistrer de chemin partiel; veuillez recompiler avec -D SAVE_DETECTORS",
     "workload was unspecified for an active device": "aucune charge de travail spécifiée pour un appareil actif",
     "you can not specify both interactive mode and config file": "vous ne pouvez pas spécifier à la fois le mode interactif (-i) et un fichier de configuration (-f)"
-}),
+    }),
 
-MSTR(
-{
-    "_LANG_": "Español mexicano",
-    "_LOCALE_": "es_MX",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_": "Español mexicano",
+"_LOCALE_": "es_MX",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                  Monte Carlo Extremo (MCX) -- CUDA                          #\n\
 #     Derechos de autor (c) 2009-2025 Qianqian Fang <q.fang at neu.edu>       #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -527,14 +527,14 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc": "ADVERTENCIA: este binario de MCX no puede guardar rutas parciales, por favor recompila mcx y asegúrate de que -D SAVE_DETECTORS sea usado por nvcc",
     "workload was unspecified for an active device": "la carga de trabajo no fue especificada para un dispositivo activo",
     "you can not specify both interactive mode and config file": "no puedes especificar tanto el modo interactivo como el archivo de configuración"
-}),
+    }),
 
-MSTR(
-{
-    "_LANG_": "Deutsch",
-    "_LOCALE_": "de_DE",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_": "Deutsch",
+"_LOCALE_": "de_DE",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                         MCX – Monte Carlo eXtreme -- CUDA                   #\n\
 #       Urheberrecht (c) 2009–2025 Qianqian Fang <q.fang at neu.edu>          #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -623,14 +623,14 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc": "WARNUNG: Diese MCX-Version kann keine Teilpfade speichern. Bitte kompilieren Sie MCX neu mit der Option -D SAVE_DETECTORS",
     "workload was unspecified for an active device": "Keine Arbeitslast für aktives Gerät angegeben",
     "you can not specify both interactive mode and config file": "Interaktiver Modus (-i) und Konfigurationsdatei (-f) dürfen nicht gleichzeitig verwendet werden"
-}),
+    }),
 
-MSTR(
-{
-    "_LANG_": "한국어",
-    "_LOCALE_": "ko_KR",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_": "한국어",
+"_LOCALE_": "ko_KR",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                           MCX – 몬테카를로 익스트림 (CUDA)                  #\n\
 #         저작권 (c) 2009–2025 Qianqian Fang <q.fang at neu.edu>              #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -715,14 +715,14 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc": "경고: 이 MCX 바이너리는 부분 경로를 저장할 수 없습니다. mcx를 다시 컴파일하고 nvcc에 -D SAVE_DETECTORS를 사용했는지 확인하세요",
     "workload was unspecified for an active device": "활성 장치에 대한 작업 부하가 지정되지 않았습니다",
     "you can not specify both interactive mode and config file": "대화형 모드와 구성 파일을 동시에 지정할 수 없습니다"
-}),
+    }),
 
-MSTR(
-{
-    "_LANG_": "हिन्दी",
-    "_LOCALE_": "hi_IN",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_": "हिन्दी",
+"_LOCALE_": "hi_IN",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                            MCX – मोंटे कार्लो एक्सट्रीम -- CUDA                  #\n\
 #       कॉपीराइट (c) 2009–2025 कियानकियान फांग <q.fang at neu.edu>             #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -808,14 +808,14 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc": "चेतावनी: यह MCX बाइनरी आंशिक पथ सहेज नहीं सकती, कृपया mcx को पुनः संकलित करें और सुनिश्चित करें कि nvcc द्वारा -D SAVE_DETECTORS का उपयोग किया गया है",
     "workload was unspecified for an active device": "सक्रिय डिवाइस के लिए कार्यभार निर्दिष्ट नहीं किया गया था",
     "you can not specify both interactive mode and config file": "आप इंटरैक्टिव मोड और कॉन्फ़िग फ़ाइल दोनों को एक साथ निर्दिष्ट नहीं कर सकते"
-}),
+    }),
 
-MSTR(
-{
-    "_LANG_": "Português",
-    "_LOCALE_": "pt_BR",
-    "_MCX_BANNER_": 
-) "\"" S_MAGENTA "###############################################################################\n\
+    MSTR(
+    {
+"_LANG_": "Português",
+"_LOCALE_": "pt_BR",
+"_MCX_BANNER_":
+        ) "\"" S_MAGENTA "###############################################################################\n\
 #                          Monte Carlo Extremo (MCX) -- CUDA                  #\n\
 #           Direitos autorais (c) 2009-2025 Qianqian Fang <q.fang at neu.edu> #\n\
 #" S_BLUE "                https://mcx.space/  &  https://neurojson.io                  " S_MAGENTA "#\n\
@@ -901,6 +901,6 @@ MSTR(
     "WARNING: this MCX binary can not save partial path, please recompile mcx and make sure -D SAVE_DETECTORS is used by nvcc": "AVISO: este binário MCX não pode salvar caminho parcial, recompile MCX e certifique-se de usar -D SAVE_DETECTORS com nvcc",
     "workload was unspecified for an active device": "carga de trabalho não especificada para dispositivo ativo",
     "you can not specify both interactive mode and config file": "não é possível especificar modo interativo e arquivo de configuração simultaneamente"
-})
+    })
 
 };
